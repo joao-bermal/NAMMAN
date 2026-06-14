@@ -1,65 +1,585 @@
-import Image from "next/image";
+'use client';
+
+import { useState, useEffect, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
+import { DownloadCloud, CheckCircle, Bookmark, Folder, PlayCircle, FolderOpen, ExternalLink, LogOut } from 'lucide-react';
+import { get, set } from 'idb-keyval';
 
 export default function Home() {
+  const router = useRouter();
+  const [query, setQuery] = useState('');
+  const [isSearching, setIsSearching] = useState(false);
+  const [results, setResults] = useState<any[]>([]);
+  const [downloadingItems, setDownloadingItems] = useState<Set<number>>(new Set());
+  const [toasts, setToasts] = useState<{id: string, message: string, type: 'success' | 'error' | 'info'}[]>([]);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [dirHandle, setDirHandle] = useState<any>(null);
+  const [authError, setAuthError] = useState(false);
+  const [activeTab, setActiveTab] = useState<'search' | 'downloads' | 'favorites'>('search');
+  const [activeCategory, setActiveCategory] = useState<string>('');
+  const [activeArchitecture, setActiveArchitecture] = useState<string>('2'); // Default A2
+  const [sortBy, setSortBy] = useState<string>('trending');
+  
+  // User Data State
+  const [userData, setUserData] = useState<any>({ settings: {}, favorites: [], downloads: [], username: '' });
+
+  const addToast = (message: string, type: 'success' | 'error' | 'info') => {
+    const id = Math.random().toString(36).substring(2, 9);
+    setToasts(prev => [...prev, { id, message, type }]);
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id));
+    }, 5000);
+  };
+
+  const checkAuth = async () => {
+    try {
+      const res = await fetch(`/api/auth/me?_=${Date.now()}`, { cache: 'no-store' });
+      if (res.status === 401) {
+        setAuthError(true);
+        router.push('/login');
+        return false;
+      }
+      return true;
+    } catch (e) {
+      return false;
+    }
+  };
+
+  const loadDirHandle = async () => {
+    try {
+      const handle = await get('nam_profiles_handle');
+      if (handle) {
+        // Request permission silently
+        const permission = await handle.queryPermission({ mode: 'readwrite' });
+        if (permission === 'granted') {
+          setDirHandle(handle);
+        }
+      }
+    } catch (e) {
+      console.log('No previous dir handle found');
+    }
+  };
+
+  const selectDirectory = async () => {
+    try {
+      if (!('showDirectoryPicker' in window)) {
+        alert('Your browser does not support native folder selection. Use Google Chrome or Edge.');
+        return;
+      }
+      
+      const handle = await (window as any).showDirectoryPicker({ mode: 'readwrite' });
+      await set('nam_profiles_handle', handle);
+      setDirHandle(handle);
+    } catch (e) {
+      console.log('Folder selection cancelled or failed', e);
+    }
+  };
+
+  const fetchUserData = async () => {
+    try {
+      const res = await fetch(`/api/user?_=${Date.now()}`, { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setUserData({ ...data.data, username: data.username || 'admin' });
+        }
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const fetchResults = useCallback(async (searchTerm: string, page: number, tab: string, category: string, sort: string, architecture: string) => {
+    setIsSearching(true);
+    try {
+      if (tab === 'downloads' || tab === 'favorites') {
+        const idsToFetch = tab === 'downloads' ? userData.downloads : userData.favorites;
+        if (!idsToFetch || idsToFetch.length === 0) {
+          setResults([]);
+          setTotalPages(1);
+          setIsSearching(false);
+          return;
+        }
+
+        const res = await fetch('/api/tones', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids: idsToFetch })
+        });
+        const data = await res.json();
+        if (data.success) {
+          let mapped = data.items.map((item: any) => ({
+            id: item.id,
+            name: item.title,
+            slug: item.slug || item.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)+/g, ''),
+            author: item.username,
+            avatar_url: item.avatar_url,
+            isA2: item.a2_models_count > 0,
+            models_count: item.models_count,
+            downloads_count: item.downloads_count,
+            favorites_count: item.favorites_count,
+            created_at: new Date(item.created_at).toLocaleDateString(),
+            image: item.images && item.images.length > 0 ? item.images[0] : null,
+            type: item.gear === 'full-rig' ? 'Full Rig' : item.gear === 'amp' ? 'Amp Head' : item.gear === 'pedal' ? 'Pedal' : 'Outboard'
+          }));
+          
+          if (category) {
+            mapped = mapped.filter((m: any) => 
+              m.type.toLowerCase().replace(' ', '-') === category || 
+              (category === 'full-rig' && m.type === 'Full Rig') || 
+              (category === 'amp' && m.type === 'Amp Head')
+            );
+          }
+          if (sort === 'newest') mapped.sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+          if (sort === 'oldest') mapped.sort((a: any, b: any) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+          if (sort === 'downloads' || sort === 'trending') mapped.sort((a: any, b: any) => b.downloads_count - a.downloads_count);
+
+          setResults(mapped);
+          setTotalPages(1);
+        } else {
+          setResults([]);
+          setTotalPages(1);
+        }
+      } else {
+        const payload: any = {
+          query_term: searchTerm,
+          page_number: page,
+          page_size: 15,
+          order_by: sort === 'downloads' ? 'downloads-all-time' : sort,
+          tag_names: null,
+          make_names: null,
+          gear_filters: category ? [category] : null,
+          is_calibrated: false,
+          size_filters: null,
+          usernames: null
+        };
+        if (architecture) {
+          payload.architecture_filter = architecture;
+        }
+
+        const res = await fetch('/api/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        const data = await res.json();
+        
+        if (res.ok && data.success && data.items) {
+          const totalCount = data.items[0]?.total_count || 0;
+          setTotalPages(Math.max(1, Math.ceil(totalCount / 15)));
+
+          const mappedResults = data.items.map((item: any) => ({
+            id: item.id,
+            name: item.title,
+            slug: item.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)+/g, ''),
+            author: item.username,
+            avatar_url: item.avatar_url,
+            isA2: item.a2_models_count > 0,
+            models_count: item.models_count,
+            downloads_count: item.downloads_count,
+            favorites_count: item.favorites_count,
+            created_at: new Date(item.created_at).toLocaleDateString(),
+            image: item.images && item.images.length > 0 ? item.images[0] : null,
+            type: item.gear === 'full-rig' ? 'Full Rig' : item.gear === 'amp' ? 'Amp Head' : item.gear === 'pedal' ? 'Pedal' : 'Outboard'
+          }));
+          setResults(mappedResults);
+        } else {
+          setResults([]);
+          setTotalPages(1);
+        }
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsSearching(false);
+    }
+  }, [userData]);
+
+  useEffect(() => {
+    checkAuth().then(isOk => {
+      if (isOk) {
+        fetchUserData();
+        loadDirHandle();
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!authError) {
+      fetchResults(query, currentPage, activeTab, activeCategory, sortBy, activeArchitecture);
+    }
+  }, [currentPage, fetchResults, authError, activeTab, activeCategory, sortBy, activeArchitecture]);
+
+  const handleSearch = (e: React.FormEvent) => {
+    e.preventDefault();
+    setCurrentPage(1);
+    fetchResults(query, 1, activeTab, activeCategory, sortBy, activeArchitecture);
+  };
+
+  const toggleFavorite = async (id: number) => {
+    setUserData((prev: any) => ({
+      ...prev,
+      favorites: prev.favorites.includes(id) 
+        ? prev.favorites.filter((fid: number) => fid !== id)
+        : [...prev.favorites, id]
+    }));
+
+    try {
+      await fetch('/api/user/favorites', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ toneId: id })
+      });
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleDownload = async (model: any) => {
+    if (!dirHandle) {
+      alert('Please select a local folder using the button above first.');
+      return;
+    }
+
+    setDownloadingItems(prev => new Set(prev).add(model.id));
+    
+    try {
+      // 1. Get permissions explicitly if not granted
+      const perm = await dirHandle.requestPermission({ mode: 'readwrite' });
+      if (perm !== 'granted') {
+        alert('Write permission to the folder was denied.');
+        return;
+      }
+
+      // 2. Fetch models URLs from backend proxy
+      const res = await fetch(`/api/models?tone_id=${model.id}`);
+      const data = await res.json();
+      
+      if (!data.success || !data.models || data.models.length === 0) {
+        alert('No models found for this capture.');
+        setDownloadingItems(prev => { const n = new Set(prev); n.delete(model.id); return n; });
+        return;
+      }
+
+      // 3. Create subdirectories
+      const safeToneName = model.name.replace(/[^a-z0-9 _-]/gi, '_').trim() || 'Unnamed_Pack';
+      const categoryFolderName = model.type === 'Full Rig' ? 'FullRig' : model.type === 'Amp Head' ? 'Amps' : model.type === 'Pedal' ? 'Pedals' : 'Outboard';
+      
+      const categoryHandle = await dirHandle.getDirectoryHandle(categoryFolderName, { create: true });
+      const packHandle = await categoryHandle.getDirectoryHandle(safeToneName, { create: true });
+
+      // 4. Filter by architecture and deduplicate models
+      let filteredModels = data.models;
+      if (activeArchitecture === '1') {
+        filteredModels = data.models.filter((m: any) => String(m.architecture_version || '1') === '1');
+      } else if (activeArchitecture === '2') {
+        filteredModels = data.models.filter((m: any) => String(m.architecture_version) === '2');
+      }
+
+      const nameToHighestArch = new Map<string, any>();
+      for (const m of filteredModels) {
+        const arch = String(m.architecture_version || '1');
+        const existing = nameToHighestArch.get(m.name);
+        if (!existing || arch > String(existing.architecture_version || '1')) {
+          nameToHighestArch.set(m.name, m);
+        }
+      }
+      filteredModels = Array.from(nameToHighestArch.values());
+
+      if (filteredModels.length === 0) {
+        alert('No models matching the selected architecture were found in this pack.');
+        setDownloadingItems(prev => { const n = new Set(prev); n.delete(model.id); return n; });
+        return;
+      }
+
+      const usedNames = new Set<string>();
+      for (const m of filteredModels) {
+        if (!m.model_url) continue;
+        
+        const fileRes = await fetch(m.model_url);
+        const blob = await fileRes.blob();
+        
+        let baseName = m.name.replace(/[^a-z0-9 _-]/gi, '_').trim() || 'model';
+        if (usedNames.has(baseName)) {
+          let i = 2;
+          while (usedNames.has(`${baseName}_${i}`)) i++;
+          baseName = `${baseName}_${i}`;
+        }
+        usedNames.add(baseName);
+        
+        const safeModelName = baseName + '.nam';
+        const fileHandle = await packHandle.getFileHandle(safeModelName, { create: true });
+        
+        const writable = await fileHandle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+      }
+      
+      // 5. Update backend tracking
+      if (userData?.username) {
+        await fetch('/api/user/downloads', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ toneId: model.id })
+        });
+        setUserData((prev: any) => ({ ...prev, downloads: [...(prev.downloads || []), model.id] }));
+      }
+      
+      addToast(`✅ Pack "${model.name}" downloaded successfully!`, 'success');
+
+    } catch (err) {
+      console.error(err);
+      addToast(`❌ Error downloading pack "${model.name}".`, 'error');
+    } finally {
+      setDownloadingItems(prev => { const n = new Set(prev); n.delete(model.id); return n; });
+    }
+  };
+
+  const handleLogout = () => {
+    // Just delete cookie client side is hard since it's HttpOnly. We need a logout route, but for now we can just redirect to /login and let the user overwrite it.
+    // Actually we can just do this via an API. Let's redirect to /login for simplicity
+    document.cookie = "token=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
+    router.push('/login');
+  };
+
+  if (authError) return <div style={{ color: 'white', textAlign: 'center', marginTop: '3rem' }}>Redirecting to Login...</div>;
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+    <main>
+      <div className="header" style={{ marginBottom: '2rem', paddingBottom: '1.5rem', borderBottom: '1px solid var(--surface-border)' }}>
+        <h1 style={{ display: 'flex', alignItems: 'baseline', gap: '1rem', fontSize: '2.5rem', margin: 0 }}>
+          ToneManager 
+          <span style={{ fontSize: '1.2rem', fontWeight: 'normal', color: 'var(--primary-color)' }}>
+            v3.0 PRO
+          </span>
+        </h1>
+        <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', background: 'var(--surface-color)', padding: '0.8rem 1.5rem', borderRadius: '50px', border: '1px solid var(--surface-border)' }}>
+          <div style={{ fontSize: '1.1rem', color: 'var(--text-muted)' }}>
+            Welcome, <strong style={{ color: '#fff' }}>{userData.username}</strong>
+          </div>
+          <div style={{ width: '1px', height: '24px', background: 'var(--surface-border)' }}></div>
+          <button onClick={handleLogout} className="action-btn" style={{ borderColor: 'transparent', background: 'transparent', padding: '0.2rem', color: '#ff6b6b' }} title="Logout">
+            <LogOut size={20} />
+          </button>
+        </div>
+      </div>
+
+      <div className="glass-panel" style={{ padding: '2rem', marginBottom: '3rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', border: dirHandle ? '1px solid var(--primary-color)' : '1px solid var(--surface-border)' }}>
+        <div>
+          <h3 style={{ margin: '0 0 0.8rem 0', fontSize: '1.5rem', color: dirHandle ? 'var(--primary-color)' : '#fff', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <FolderOpen size={24} /> {dirHandle ? 'Synced Local Folder' : 'Local Sync Required'}
+          </h3>
+          <p style={{ margin: 0, fontSize: '1.1rem', color: 'var(--text-muted)' }}>
+            {dirHandle ? (
+              <span style={{ color: '#fff' }}>Saving downloads directly to: <strong>{dirHandle.name}</strong></span>
+            ) : (
+              'Select a folder on your computer to allow direct downloads.'
+            )}
           </p>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+        <button 
+          onClick={selectDirectory} 
+          className="search-button" 
+          style={{ 
+            background: dirHandle ? 'transparent' : 'var(--primary-color)', 
+            color: dirHandle ? 'var(--primary-color)' : '#000',
+            border: dirHandle ? '1px solid var(--primary-color)' : 'none',
+            fontSize: '1.1rem',
+            padding: '1rem 2rem',
+            borderRadius: '8px'
+          }}
+        >
+          {dirHandle ? 'Change Folder' : 'Select Local Folder Now'}
+        </button>
+      </div>
+
+      <div style={{ display: 'flex', gap: '1rem', marginBottom: '2rem', borderBottom: '1px solid var(--surface-border)', paddingBottom: '1rem' }}>
+        <button className={`tab-btn ${activeTab === 'search' ? 'active' : ''}`} onClick={() => setActiveTab('search')}>Search</button>
+        <button className={`tab-btn ${activeTab === 'downloads' ? 'active' : ''}`} onClick={() => setActiveTab('downloads')}>My Downloads</button>
+        <button className={`tab-btn ${activeTab === 'favorites' ? 'active' : ''}`} onClick={() => setActiveTab('favorites')}>My Favorites</button>
+      </div>
+
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem', flexWrap: 'wrap', gap: '1rem' }}>
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+          <button className={`filter-btn ${activeCategory === '' ? 'active' : ''}`} onClick={() => setActiveCategory('')}>All</button>
+          <button className={`filter-btn ${activeCategory === 'full-rig' ? 'active' : ''}`} onClick={() => setActiveCategory('full-rig')}>Full Rig</button>
+          <button className={`filter-btn ${activeCategory === 'amp' ? 'active' : ''}`} onClick={() => setActiveCategory('amp')}>Amp Head</button>
+          <button className={`filter-btn ${activeCategory === 'pedal' ? 'active' : ''}`} onClick={() => setActiveCategory('pedal')}>Pedal</button>
+          <button className={`filter-btn ${activeCategory === 'outboard' ? 'active' : ''}`} onClick={() => setActiveCategory('outboard')}>Outboard</button>
         </div>
-      </main>
-    </div>
+
+        <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+          <select 
+            className="sort-select" 
+            value={activeArchitecture} 
+            onChange={(e) => setActiveArchitecture(e.target.value)}
+          >
+            <option value="">All Versions</option>
+            <option value="2">NAM A2 Only</option>
+            <option value="1">NAM A1 (Legacy) Only</option>
+            <option value="custom">Custom</option>
+          </select>
+
+          <select 
+            className="sort-select" 
+            value={sortBy} 
+            onChange={(e) => setSortBy(e.target.value)}
+          >
+            <option value="trending">Trending</option>
+            <option value="newest">Newest</option>
+            <option value="oldest">Oldest</option>
+            <option value="downloads">Most Downloaded</option>
+            <option value="best-match">Best Match</option>
+          </select>
+        </div>
+      </div>
+
+      {activeTab === 'search' && (
+        <form className="search-container" onSubmit={handleSearch}>
+          <input 
+            type="text" 
+            className="search-input" 
+            placeholder="Search packages (e.g., Fender, 6505+, Bogner...)" 
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          <button type="submit" className="search-button" disabled={isSearching}>
+            {isSearching ? 'Searching...' : 'Search'}
+          </button>
+        </form>
+      )}
+
+      <div className="models-list">
+        {results.map(model => {
+          const isDownloaded = userData.downloads?.includes(model.id);
+          const isFavorited = userData.favorites?.includes(model.id);
+
+          return (
+            <div key={model.id} className="model-card">
+              <div className="model-image-container">
+                {model.image ? (
+                  <img src={model.image} alt={model.name} className="model-image" />
+                ) : (
+                  <Folder size={32} color="#555" />
+                )}
+              </div>
+              
+              <div className="model-info">
+                <div>
+                  <div className="model-header">
+                    <h3 className="model-title">
+                      <a href={`https://www.tone3000.com/tones/${model.slug}-${model.id}`} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none' }}>
+                        {model.name} <ExternalLink size={14} style={{ opacity: 0.5, marginLeft: '4px' }} />
+                      </a>
+                    </h3>
+                  </div>
+                  
+                  <div className="model-gear">
+                    {model.type}
+                    {model.isA2 && <span className="badge">NAM A2</span>}
+                    {!model.isA2 && <span className="badge">NAM</span>}
+                  </div>
+                  
+                  <div className="model-stats">
+                    <div className="stat-item">
+                      <DownloadCloud size={14} /> {model.downloads_count}
+                    </div>
+                    <div 
+                      className={`stat-item stat-action ${isFavorited ? 'active' : ''}`}
+                      onClick={() => toggleFavorite(model.id)}
+                    >
+                      <Bookmark size={14} fill={isFavorited ? "currentColor" : "none"} /> {model.favorites_count}
+                    </div>
+                    <div className="stat-item">
+                      <Folder size={14} /> {model.models_count}
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
+                  <div className="model-author-row">
+                    {model.avatar_url ? (
+                      <img src={model.avatar_url} alt={model.author} className="author-avatar" />
+                    ) : (
+                      <div className="author-avatar" />
+                    )}
+                    <span>{model.author}</span>
+                    <span>·</span>
+                    <span>{model.created_at}</span>
+                  </div>
+
+                  {isDownloaded ? (
+                    <button 
+                      className="action-btn" 
+                      onClick={() => handleDownload(model)}
+                      disabled={downloadingItems.has(model.id) || !dirHandle}
+                      style={{ color: 'var(--primary-color)', borderColor: 'var(--primary-color)', opacity: dirHandle ? 1 : 0.5 }}
+                      title={!dirHandle ? 'Select a folder above first' : 'Redownload'}
+                    >
+                      {downloadingItems.has(model.id) ? 'Downloading...' : <><CheckCircle size={16} /> Redownload</>}
+                    </button>
+                  ) : (
+                    <button 
+                      className="action-btn"
+                      onClick={() => handleDownload(model)}
+                      disabled={downloadingItems.has(model.id) || !dirHandle}
+                      style={{ opacity: dirHandle ? 1 : 0.5 }}
+                      title={!dirHandle ? 'Select a folder above first' : ''}
+                    >
+                      {downloadingItems.has(model.id) ? 'Downloading...' : <><DownloadCloud size={16} /> Download</>}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      
+      {totalPages > 1 && (
+        <div className="pagination-controls" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '1rem', marginTop: '3rem' }}>
+          <button 
+            className="action-btn" 
+            disabled={currentPage === 1 || isSearching}
+            onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+          >
+            Previous
+          </button>
+          <span style={{ color: 'var(--text-primary)', fontSize: '0.9rem' }}>
+            Page {currentPage} of {totalPages}
+          </span>
+          <button 
+            className="action-btn" 
+            disabled={currentPage >= totalPages || isSearching}
+            onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+          >
+            Next
+          </button>
+        </div>
+      )}
+
+      {results.length === 0 && !isSearching && (
+        <div style={{ textAlign: 'center', marginTop: '3rem', color: 'var(--text-muted)' }}>
+          {query ? `No models found for "${query}"` : "No models found."}
+        </div>
+      )}
+
+      {/* Toasts Container */}
+      <div style={{
+        position: 'fixed', bottom: '20px', right: '20px', display: 'flex', flexDirection: 'column', gap: '10px', zIndex: 9999
+      }}>
+        {toasts.map(toast => (
+          <div key={toast.id} style={{
+            background: toast.type === 'success' ? '#10b981' : toast.type === 'error' ? '#ef4444' : '#3b82f6',
+            color: 'white', padding: '12px 20px', borderRadius: '8px', boxShadow: '0 4px 6px rgba(0,0,0,0.2)',
+            transition: 'opacity 0.3s ease-out'
+          }}>
+            {toast.message}
+          </div>
+        ))}
+      </div>
+    </main>
   );
 }
