@@ -1,45 +1,23 @@
-import { promises as fs } from 'fs';
-import path from 'path';
+import { PrismaClient } from '@prisma/client';
 import crypto from 'crypto';
 
-const DB_FILE = path.join(process.cwd(), 'db.json');
+const globalForPrisma = global as unknown as { prisma: PrismaClient };
+
+export const prisma = globalForPrisma.prisma || new PrismaClient();
+
+if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma;
 
 export interface UserSettings {
   downloadDir: string;
 }
 
 export interface UserData {
+  id: string;
+  username: string;
   passwordHash: string;
   settings: UserSettings;
   favorites: number[];
   downloads: number[];
-}
-
-export interface Database {
-  users: {
-    [username: string]: UserData;
-  };
-}
-
-const DEFAULT_DB: Database = {
-  users: {}
-};
-
-async function readDB(): Promise<Database> {
-  try {
-    const data = await fs.readFile(DB_FILE, 'utf-8');
-    return JSON.parse(data);
-  } catch (error: any) {
-    if (error.code === 'ENOENT') {
-      await writeDB(DEFAULT_DB);
-      return DEFAULT_DB;
-    }
-    throw error;
-  }
-}
-
-async function writeDB(data: Database): Promise<void> {
-  await fs.writeFile(DB_FILE, JSON.stringify(data, null, 2), 'utf-8');
 }
 
 export function hashPassword(password: string): string {
@@ -47,62 +25,85 @@ export function hashPassword(password: string): string {
 }
 
 export async function createUser(username: string, passwordHash: string): Promise<UserData> {
-  const db = await readDB();
-  if (db.users[username]) {
+  const existing = await prisma.user.findUnique({ where: { username } });
+  if (existing) {
     throw new Error('User already exists');
   }
   
-  db.users[username] = {
-    passwordHash,
+  const user = await prisma.user.create({
+    data: {
+      username,
+      passwordHash,
+    }
+  });
+  
+  return {
+    id: user.id,
+    username: user.username,
+    passwordHash: user.passwordHash,
     settings: { downloadDir: '' },
     favorites: [],
     downloads: []
   };
-  
-  await writeDB(db);
-  return db.users[username];
 }
 
 export async function getUserData(username: string): Promise<UserData | null> {
-  const db = await readDB();
-  return db.users[username] || null;
+  const user = await prisma.user.findUnique({
+    where: { username },
+    include: {
+      favorites: true,
+      downloads: true
+    }
+  });
+  
+  if (!user) return null;
+  
+  return {
+    id: user.id,
+    username: user.username,
+    passwordHash: user.passwordHash,
+    settings: { downloadDir: '' },
+    favorites: user.favorites.map(f => f.toneId),
+    downloads: user.downloads.map(d => d.toneId)
+  };
 }
 
 export async function toggleFavorite(username: string, toneId: number): Promise<UserData> {
-  const db = await readDB();
-  if (!db.users[username]) throw new Error("User not found");
+  const user = await prisma.user.findUnique({ where: { username }, include: { favorites: true } });
+  if (!user) throw new Error("User not found");
   
-  const user = db.users[username];
-  const index = user.favorites.indexOf(toneId);
-  if (index === -1) {
-    user.favorites.push(toneId);
+  const existingFav = user.favorites.find(f => f.toneId === toneId);
+  
+  if (existingFav) {
+    await prisma.favorite.delete({ where: { id: existingFav.id } });
   } else {
-    user.favorites.splice(index, 1);
+    await prisma.favorite.create({
+      data: {
+        toneId,
+        userId: user.id
+      }
+    });
   }
-  await writeDB(db);
-  return user;
+  
+  return (await getUserData(username)) as UserData;
 }
 
 export async function markAsDownloaded(username: string, toneId: number): Promise<void> {
-  const db = await readDB();
-  if (!db.users[username]) throw new Error("User not found");
+  const user = await prisma.user.findUnique({ where: { username }, include: { downloads: true } });
+  if (!user) throw new Error("User not found");
   
-  const user = db.users[username];
-  if (!user.downloads.includes(toneId)) {
-    user.downloads.push(toneId);
-    await writeDB(db);
+  const existingDownload = user.downloads.find(d => d.toneId === toneId);
+  if (!existingDownload) {
+    await prisma.download.create({
+      data: {
+        toneId,
+        userId: user.id
+      }
+    });
   }
 }
 
 export async function updateUserSettings(username: string, settings: Partial<UserSettings>): Promise<UserData> {
-  const db = await readDB();
-  if (!db.users[username]) throw new Error("User not found");
-  
-  db.users[username].settings = {
-    ...db.users[username].settings,
-    ...settings
-  };
-  
-  await writeDB(db);
-  return db.users[username];
+  // Settings are not currently persisted in Supabase in this minimal schema
+  return (await getUserData(username)) as UserData;
 }
