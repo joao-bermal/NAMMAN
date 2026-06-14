@@ -378,3 +378,14 @@ button {
   justify-content: flex-end;
   gap: 0.5rem;
 }
+
+.guest-login-msg {
+  display: none;
+}
+
+@media (min-width: 768px) {
+  .guest-login-msg {
+    display: block;
+  }
+}
+

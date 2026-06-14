@@ -364,13 +364,13 @@ export default function Home() {
             </span>
           </h1>
           <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: '1.1rem' }}>
-            A tool to help you organize NAM profiles from ToneHunt.
+            A tool to help you organize NAM profiles from <a href="https://www.tone3000.com" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--primary-color)', textDecoration: 'none', fontWeight: 'bold' }}>tone3000</a>.
           </p>
         </div>
         
         {isGuest ? (
           <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', background: 'var(--surface-color)', padding: '0.8rem 1.5rem', borderRadius: '50px', border: '1px solid var(--primary-color)' }}>
-            <div style={{ fontSize: '0.95rem', color: 'var(--text-muted)', display: 'none', '@media (min-width: 768px)': { display: 'block' } } as any}>
+            <div className="guest-login-msg" style={{ fontSize: '0.95rem', color: 'var(--text-muted)' }}>
               Login to save favorites and track downloads
             </div>
             <button onClick={() => router.push('/login')} className="action-btn" style={{ background: 'var(--primary-color)', color: '#000', padding: '0.5rem 1.2rem', border: 'none', fontWeight: 'bold' }}>
