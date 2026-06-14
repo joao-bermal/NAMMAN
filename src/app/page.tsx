@@ -341,11 +341,16 @@ export default function Home() {
     }
   };
 
-  const handleLogout = () => {
-    // Just delete cookie client side is hard since it's HttpOnly. We need a logout route, but for now we can just redirect to /login and let the user overwrite it.
-    // Actually we can just do this via an API. Let's redirect to /login for simplicity
-    document.cookie = "token=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
-    router.push('/login');
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+      setIsGuest(true);
+      setUserData({ settings: {}, favorites: [], downloads: [], username: '' });
+      setActiveTab('search'); // Reset to search tab to avoid showing locked screens unnecessarily
+      addToast('Logged out successfully', 'success');
+    } catch (e) {
+      console.error(e);
+    }
   };
 
   return (
