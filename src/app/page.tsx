@@ -15,7 +15,7 @@ export default function Home() {
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [dirHandle, setDirHandle] = useState<any>(null);
-  const [authError, setAuthError] = useState(false);
+  const [isGuest, setIsGuest] = useState(false);
   const [activeTab, setActiveTab] = useState<'search' | 'downloads' | 'favorites'>('search');
   const [activeCategory, setActiveCategory] = useState<string>('');
   const [activeArchitecture, setActiveArchitecture] = useState<string>('2'); // Default A2
@@ -36,12 +36,12 @@ export default function Home() {
     try {
       const res = await fetch(`/api/auth/me?_=${Date.now()}`, { cache: 'no-store' });
       if (res.status === 401) {
-        setAuthError(true);
-        router.push('/login');
+        setIsGuest(true);
         return false;
       }
       return true;
     } catch (e) {
+      setIsGuest(true);
       return false;
     }
   };
@@ -207,10 +207,10 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (!authError) {
+    if (!isGuest || activeTab === 'search') {
       fetchResults(query, currentPage, activeTab, activeCategory, sortBy, activeArchitecture);
     }
-  }, [currentPage, fetchResults, authError, activeTab, activeCategory, sortBy, activeArchitecture]);
+  }, [currentPage, fetchResults, isGuest, activeTab, activeCategory, sortBy, activeArchitecture]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -219,6 +219,10 @@ export default function Home() {
   };
 
   const toggleFavorite = async (id: number) => {
+    if (isGuest) {
+      addToast('🔒 Please login or create an account to save favorites!', 'info');
+      return;
+    }
     setUserData((prev: any) => ({
       ...prev,
       favorites: prev.favorites.includes(id) 
@@ -344,26 +348,41 @@ export default function Home() {
     router.push('/login');
   };
 
-  if (authError) return <div style={{ color: 'white', textAlign: 'center', marginTop: '3rem' }}>Redirecting to Login...</div>;
-
   return (
     <main>
       <div className="header" style={{ marginBottom: '2rem', paddingBottom: '1.5rem', borderBottom: '1px solid var(--surface-border)' }}>
-        <h1 style={{ display: 'flex', alignItems: 'baseline', gap: '1rem', fontSize: '2.5rem', margin: 0 }}>
-          ToneManager 
-          <span style={{ fontSize: '1.2rem', fontWeight: 'normal', color: 'var(--primary-color)' }}>
-            v3.0 PRO
-          </span>
-        </h1>
-        <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', background: 'var(--surface-color)', padding: '0.8rem 1.5rem', borderRadius: '50px', border: '1px solid var(--surface-border)' }}>
-          <div style={{ fontSize: '1.1rem', color: 'var(--text-muted)' }}>
-            Welcome, <strong style={{ color: '#fff' }}>{userData.username}</strong>
-          </div>
-          <div style={{ width: '1px', height: '24px', background: 'var(--surface-border)' }}></div>
-          <button onClick={handleLogout} className="action-btn" style={{ borderColor: 'transparent', background: 'transparent', padding: '0.2rem', color: '#ff6b6b' }} title="Logout">
-            <LogOut size={20} />
-          </button>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+          <h1 style={{ display: 'flex', alignItems: 'baseline', gap: '1rem', fontSize: '2.5rem', margin: 0 }}>
+            ToneManager 
+            <span style={{ fontSize: '1.2rem', fontWeight: 'normal', color: 'var(--primary-color)' }}>
+              v3.0 PRO
+            </span>
+          </h1>
+          <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: '1.1rem' }}>
+            A tool to help you organize NAM profiles from ToneHunt.
+          </p>
         </div>
+        
+        {isGuest ? (
+          <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', background: 'var(--surface-color)', padding: '0.8rem 1.5rem', borderRadius: '50px', border: '1px solid var(--primary-color)' }}>
+            <div style={{ fontSize: '0.95rem', color: 'var(--text-muted)', display: 'none', '@media (min-width: 768px)': { display: 'block' } } as any}>
+              Login to save favorites and track downloads
+            </div>
+            <button onClick={() => router.push('/login')} className="action-btn" style={{ background: 'var(--primary-color)', color: '#000', padding: '0.5rem 1.2rem', border: 'none', fontWeight: 'bold' }}>
+              Create Account / Login
+            </button>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', background: 'var(--surface-color)', padding: '0.8rem 1.5rem', borderRadius: '50px', border: '1px solid var(--surface-border)' }}>
+            <div style={{ fontSize: '1.1rem', color: 'var(--text-muted)' }}>
+              Welcome, <strong style={{ color: '#fff' }}>{userData.username}</strong>
+            </div>
+            <div style={{ width: '1px', height: '24px', background: 'var(--surface-border)' }}></div>
+            <button onClick={handleLogout} className="action-btn" style={{ borderColor: 'transparent', background: 'transparent', padding: '0.2rem', color: '#ff6b6b' }} title="Logout">
+              <LogOut size={20} />
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="glass-panel" style={{ padding: '2rem', marginBottom: '3rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', border: dirHandle ? '1px solid var(--primary-color)' : '1px solid var(--surface-border)' }}>
@@ -401,40 +420,53 @@ export default function Home() {
         <button className={`tab-btn ${activeTab === 'favorites' ? 'active' : ''}`} onClick={() => setActiveTab('favorites')}>My Favorites</button>
       </div>
 
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem', flexWrap: 'wrap', gap: '1rem' }}>
-        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-          <button className={`filter-btn ${activeCategory === '' ? 'active' : ''}`} onClick={() => setActiveCategory('')}>All</button>
-          <button className={`filter-btn ${activeCategory === 'full-rig' ? 'active' : ''}`} onClick={() => setActiveCategory('full-rig')}>Full Rig</button>
-          <button className={`filter-btn ${activeCategory === 'amp' ? 'active' : ''}`} onClick={() => setActiveCategory('amp')}>Amp Head</button>
-          <button className={`filter-btn ${activeCategory === 'pedal' ? 'active' : ''}`} onClick={() => setActiveCategory('pedal')}>Pedal</button>
-          <button className={`filter-btn ${activeCategory === 'outboard' ? 'active' : ''}`} onClick={() => setActiveCategory('outboard')}>Outboard</button>
+      {(activeTab === 'downloads' || activeTab === 'favorites') && isGuest ? (
+        <div style={{ textAlign: 'center', padding: '4rem 1rem', background: 'var(--surface-color)', borderRadius: '12px', border: '1px solid var(--surface-border)', marginBottom: '2rem' }}>
+          <Bookmark size={48} color="var(--primary-color)" style={{ margin: '0 auto 1.5rem auto', opacity: 0.8 }} />
+          <h2 style={{ marginBottom: '1rem', fontSize: '2rem' }}>Unlock {activeTab === 'downloads' ? 'Download History' : 'Favorites'}</h2>
+          <p style={{ color: 'var(--text-muted)', marginBottom: '2rem', fontSize: '1.2rem', maxWidth: '500px', margin: '0 auto 2rem auto' }}>
+            You need an account to view and manage your {activeTab === 'downloads' ? 'download history' : 'favorite models'}.
+          </p>
+          <button onClick={() => router.push('/login')} className="search-button" style={{ display: 'inline-block', padding: '1rem 2rem', fontSize: '1.1rem' }}>
+            Create Account / Login
+          </button>
         </div>
+      ) : (
+        <>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem', flexWrap: 'wrap', gap: '1rem' }}>
+            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <button className={`filter-btn ${activeCategory === '' ? 'active' : ''}`} onClick={() => setActiveCategory('')}>All</button>
+              <button className={`filter-btn ${activeCategory === 'full-rig' ? 'active' : ''}`} onClick={() => setActiveCategory('full-rig')}>Full Rig</button>
+              <button className={`filter-btn ${activeCategory === 'amp' ? 'active' : ''}`} onClick={() => setActiveCategory('amp')}>Amp Head</button>
+              <button className={`filter-btn ${activeCategory === 'pedal' ? 'active' : ''}`} onClick={() => setActiveCategory('pedal')}>Pedal</button>
+              <button className={`filter-btn ${activeCategory === 'outboard' ? 'active' : ''}`} onClick={() => setActiveCategory('outboard')}>Outboard</button>
+            </div>
 
-        <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
-          <select 
-            className="sort-select" 
-            value={activeArchitecture} 
-            onChange={(e) => setActiveArchitecture(e.target.value)}
-          >
-            <option value="">All Versions</option>
-            <option value="2">NAM A2 Only</option>
-            <option value="1">NAM A1 (Legacy) Only</option>
-            <option value="custom">Custom</option>
-          </select>
+            <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+              <select 
+                className="sort-select" 
+                value={activeArchitecture} 
+                onChange={(e) => setActiveArchitecture(e.target.value)}
+              >
+                <option value="">All Versions</option>
+                <option value="2">NAM A2 Only</option>
+                <option value="1">NAM A1 (Legacy) Only</option>
+                <option value="custom">Custom</option>
+              </select>
 
-          <select 
-            className="sort-select" 
-            value={sortBy} 
-            onChange={(e) => setSortBy(e.target.value)}
-          >
-            <option value="trending">Trending</option>
-            <option value="newest">Newest</option>
-            <option value="oldest">Oldest</option>
-            <option value="downloads">Most Downloaded</option>
-            <option value="best-match">Best Match</option>
-          </select>
-        </div>
-      </div>
+              <select 
+                className="sort-select" 
+                value={sortBy} 
+                onChange={(e) => setSortBy(e.target.value)}
+              >
+                <option value="trending">Trending</option>
+                <option value="newest">Newest</option>
+                <option value="oldest">Oldest</option>
+                <option value="downloads">Most Downloaded</option>
+                <option value="best-match">Best Match</option>
+              </select>
+            </div>
+          </div>
 
       {activeTab === 'search' && (
         <form className="search-container" onSubmit={handleSearch}>
@@ -564,6 +596,8 @@ export default function Home() {
         <div style={{ textAlign: 'center', marginTop: '3rem', color: 'var(--text-muted)' }}>
           {query ? `No models found for "${query}"` : "No models found."}
         </div>
+      )}
+      </>
       )}
 
       {/* Toasts Container */}
