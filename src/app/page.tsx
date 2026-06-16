@@ -132,6 +132,11 @@ export default function Home() {
               (category === 'ir' && m.type === 'Cabinet / IR')
             );
           }
+          if (architecture === '2') {
+            mapped = mapped.filter((m: any) => m.isA2);
+          } else if (architecture === '1') {
+            mapped = mapped.filter((m: any) => m.hasA1);
+          }
           if (sort === 'newest') mapped.sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
           if (sort === 'oldest') mapped.sort((a: any, b: any) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
           if (sort === 'downloads' || sort === 'trending') mapped.sort((a: any, b: any) => b.downloads_count - a.downloads_count);
@@ -187,6 +192,13 @@ export default function Home() {
             image: item.images && item.images.length > 0 ? item.images[0] : null,
             type: item.gear === 'full-rig' ? 'Full Rig' : item.gear === 'amp' ? 'Amp Head' : item.gear === 'pedal' ? 'Pedal' : item.gear === 'ir' ? 'Cabinet / IR' : 'Outboard'
           }));
+          
+          if (architecture === '2') {
+            mappedResults = mappedResults.filter((m: any) => m.isA2);
+          } else if (architecture === '1') {
+            mappedResults = mappedResults.filter((m: any) => m.hasA1);
+          }
+
           setResults(mappedResults);
         } else {
           if (res.status === 401 || res.status === 403) {
