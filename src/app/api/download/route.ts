@@ -1,72 +1,50 @@
 import { NextResponse } from 'next/server';
-import { promises as fs } from 'fs';
-import path from 'path';
-import { getUserData, markAsDownloaded } from '@/lib/db';
+import { cookies } from 'next/headers';
+import { getUserData } from '@/lib/db';
 
-export async function POST(request: Request) {
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const targetUrl = searchParams.get('url');
+
+  if (!targetUrl) {
+    return NextResponse.json({ error: 'url is required' }, { status: 400 });
+  }
+
+  const cookieStore = await cookies();
+  const username = cookieStore.get('token')?.value;
+
+  if (!username) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  const user = await getUserData(username);
+  if (!user || !user.tone3000AccessToken) {
+    return NextResponse.json({ error: 'Tone3000 account not connected' }, { status: 403 });
+  }
+
   try {
-    const body = await request.json();
-    const { model } = body;
-
-    if (!model) {
-      return NextResponse.json({ success: false, error: 'Model required' }, { status: 400 });
-    }
-
-    const { id, name, type } = model;
-    
-    // Fetch models belonging to this tone (pack)
-    const API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd6eWJpdW9weGtkeGJ5dG5vamRzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MzgwODIxNjUsImV4cCI6MjA1MzY1ODE2NX0.Gq66BJXjtLsqP2nAGXm9Xb9PAjoeZalWUj66K4nmVSU";
-    
-    const modelsRes = await fetch(`https://api.tone3000.com/rest/v1/models?tone_id=eq.${id}&select=name,model_url`, {
+    const tone3000Res = await fetch(targetUrl, {
+      method: 'GET',
+      cache: 'no-store',
       headers: {
-        'apikey': API_KEY,
-        'Authorization': `Bearer ${API_KEY}`
+        'Authorization': `Bearer ${user.tone3000AccessToken}`,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ToneManager/3.0'
       }
     });
 
-    if (!modelsRes.ok) {
-      return NextResponse.json({ success: false, error: 'Could not fetch models list from Tone3000' }, { status: 404 });
+    if (!tone3000Res.ok) {
+      return NextResponse.json({ error: 'Failed to fetch from Tone3000' }, { status: tone3000Res.status });
     }
 
-    const modelsData = await modelsRes.json();
-    if (!modelsData || modelsData.length === 0) {
-      return NextResponse.json({ success: false, error: 'No models found for this tone' }, { status: 404 });
-    }
-
-    const userData = await getUserData("local-user");
-    const safeToneName = name.replace(/[^a-z0-9]/gi, '_');
-    if (!userData) return NextResponse.json({ success: false, error: 'User not found' }, { status: 404 });
-    const baseDir = userData.settings?.downloadDir || path.join(process.cwd(), 'NAM_Profiles');
-    const categoryPath = path.join(baseDir, type || 'Amps');
-    const packPath = path.join(categoryPath, safeToneName);
-
-    // Create the folder for the pack
-    await fs.mkdir(packPath, { recursive: true });
-
-    let downloadedCount = 0;
-
-    for (const m of modelsData) {
-      if (m.model_url) {
-        const fileRes = await fetch(m.model_url);
-        if (fileRes.ok) {
-          const buffer = Buffer.from(await fileRes.arrayBuffer());
-          const safeModelName = m.name.replace(/[^a-z0-9]/gi, '_');
-          const namPath = path.join(packPath, `${safeModelName}.nam`);
-          await fs.writeFile(namPath, buffer);
-          downloadedCount++;
-        }
+    // Stream the response back to the client
+    return new NextResponse(tone3000Res.body, {
+      headers: {
+        'Content-Type': tone3000Res.headers.get('Content-Type') || 'application/octet-stream',
+        'Content-Disposition': tone3000Res.headers.get('Content-Disposition') || 'attachment'
       }
-    }
-
-    if (downloadedCount === 0) {
-      return NextResponse.json({ success: false, error: 'Failed to download any model files' }, { status: 500 });
-    }
-
-    await markAsDownloaded("local-user", id);
-
-    return NextResponse.json({ success: true, message: `Downloaded ${downloadedCount} models successfully` });
-  } catch (error) {
-    console.error('Download error:', error);
-    return NextResponse.json({ success: false, error: 'Internal server error' }, { status: 500 });
+    });
+  } catch (err) {
+    console.error('Proxy download error:', err);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

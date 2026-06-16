@@ -18,6 +18,8 @@ export interface UserData {
   settings: UserSettings;
   favorites: number[];
   downloads: number[];
+  tone3000AccessToken?: string | null;
+  tone3000Connected?: boolean;
 }
 
 export function hashPassword(password: string): string {
@@ -43,7 +45,8 @@ export async function createUser(username: string, passwordHash: string): Promis
     passwordHash: user.passwordHash,
     settings: { downloadDir: '' },
     favorites: [],
-    downloads: []
+    downloads: [],
+    tone3000Connected: false
   };
 }
 
@@ -64,7 +67,9 @@ export async function getUserData(username: string): Promise<UserData | null> {
     passwordHash: user.passwordHash,
     settings: { downloadDir: '' },
     favorites: user.favorites.map(f => f.toneId),
-    downloads: user.downloads.map(d => d.toneId)
+    downloads: user.downloads.map(d => d.toneId),
+    tone3000AccessToken: user.tone3000AccessToken,
+    tone3000Connected: !!user.tone3000AccessToken
   };
 }
 

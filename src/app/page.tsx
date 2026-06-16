@@ -121,14 +121,15 @@ export default function Home() {
             favorites_count: item.favorites_count,
             created_at: new Date(item.created_at).toLocaleDateString(),
             image: item.images && item.images.length > 0 ? item.images[0] : null,
-            type: item.gear === 'full-rig' ? 'Full Rig' : item.gear === 'amp' ? 'Amp Head' : item.gear === 'pedal' ? 'Pedal' : 'Outboard'
+            type: item.gear === 'full-rig' ? 'Full Rig' : item.gear === 'amp' ? 'Amp Head' : item.gear === 'pedal' ? 'Pedal' : item.gear === 'ir' ? 'Cabinet / IR' : 'Outboard'
           }));
           
           if (category) {
             mapped = mapped.filter((m: any) => 
               m.type.toLowerCase().replace(' ', '-') === category || 
               (category === 'full-rig' && m.type === 'Full Rig') || 
-              (category === 'amp' && m.type === 'Amp Head')
+              (category === 'amp' && m.type === 'Amp Head') ||
+              (category === 'ir' && m.type === 'Cabinet / IR')
             );
           }
           if (sort === 'newest') mapped.sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
@@ -174,18 +175,25 @@ export default function Home() {
             id: item.id,
             name: item.title,
             slug: item.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)+/g, ''),
-            author: item.username,
-            avatar_url: item.avatar_url,
+            author: item.user?.username || item.username,
+            avatar_url: item.user?.avatar_url || item.avatar_url,
             isA2: item.a2_models_count > 0,
+            hasA1: item.a1_models_count > 0,
+            hasIR: item.irs_count > 0,
             models_count: item.models_count,
             downloads_count: item.downloads_count,
             favorites_count: item.favorites_count,
             created_at: new Date(item.created_at).toLocaleDateString(),
             image: item.images && item.images.length > 0 ? item.images[0] : null,
-            type: item.gear === 'full-rig' ? 'Full Rig' : item.gear === 'amp' ? 'Amp Head' : item.gear === 'pedal' ? 'Pedal' : 'Outboard'
+            type: item.gear === 'full-rig' ? 'Full Rig' : item.gear === 'amp' ? 'Amp Head' : item.gear === 'pedal' ? 'Pedal' : item.gear === 'ir' ? 'Cabinet / IR' : 'Outboard'
           }));
           setResults(mappedResults);
         } else {
+          if (res.status === 401 || res.status === 403) {
+            alert("Your Tone3000 session has expired. Reconnecting...");
+            window.location.href = '/api/auth/tone3000';
+            return;
+          }
           setResults([]);
           setTotalPages(1);
         }
@@ -242,7 +250,9 @@ export default function Home() {
   };
 
   const handleDownload = async (model: any) => {
-    if (!dirHandle) {
+    const isFileSystemSupported = typeof window !== 'undefined' && 'showDirectoryPicker' in window;
+    
+    if (isFileSystemSupported && !dirHandle) {
       alert('Please select a local folder using the button above first.');
       return;
     }
@@ -251,12 +261,13 @@ export default function Home() {
     
     try {
       // 1. Get permissions explicitly if not granted
-      const perm = await dirHandle.requestPermission({ mode: 'readwrite' });
-      if (perm !== 'granted') {
-        alert('Write permission to the folder was denied.');
-        return;
+      if (dirHandle) {
+        const perm = await dirHandle.requestPermission({ mode: 'readwrite' });
+        if (perm !== 'granted') {
+          alert('Write permission to the folder was denied.');
+          return;
+        }
       }
-
       // 2. Fetch models URLs from backend proxy
       const res = await fetch(`/api/models?tone_id=${model.id}`);
       const data = await res.json();
@@ -269,17 +280,20 @@ export default function Home() {
 
       // 3. Create subdirectories
       const safeToneName = model.name.replace(/[^a-z0-9 _-]/gi, '_').trim() || 'Unnamed_Pack';
-      const categoryFolderName = model.type === 'Full Rig' ? 'FullRig' : model.type === 'Amp Head' ? 'Amps' : model.type === 'Pedal' ? 'Pedals' : 'Outboard';
+      const categoryFolderName = model.type === 'Full Rig' ? 'FullRig' : model.type === 'Amp Head' ? 'Amps' : model.type === 'Pedal' ? 'Pedals' : model.type === 'Cabinet / IR' ? 'Cabinets_IRs' : 'Outboard';
       
-      const categoryHandle = await dirHandle.getDirectoryHandle(categoryFolderName, { create: true });
-      const packHandle = await categoryHandle.getDirectoryHandle(safeToneName, { create: true });
+      let packHandle: any = null;
+      if (dirHandle) {
+        const categoryHandle = await dirHandle.getDirectoryHandle(categoryFolderName, { create: true });
+        packHandle = await categoryHandle.getDirectoryHandle(safeToneName, { create: true });
+      }
 
       // 4. Filter by architecture and deduplicate models
       let filteredModels = data.models;
       if (activeArchitecture === '1') {
-        filteredModels = data.models.filter((m: any) => String(m.architecture_version || '1') === '1');
+        filteredModels = data.models.filter((m: any) => m.model_url?.toLowerCase().endsWith('.wav') || String(m.architecture_version || '1') === '1');
       } else if (activeArchitecture === '2') {
-        filteredModels = data.models.filter((m: any) => String(m.architecture_version) === '2');
+        filteredModels = data.models.filter((m: any) => m.model_url?.toLowerCase().endsWith('.wav') || String(m.architecture_version) === '2');
       }
 
       const nameToHighestArch = new Map<string, any>();
@@ -302,7 +316,10 @@ export default function Home() {
       for (const m of filteredModels) {
         if (!m.model_url) continue;
         
-        const fileRes = await fetch(m.model_url);
+        const fileRes = await fetch(`/api/download?url=${encodeURIComponent(m.model_url)}`);
+        if (!fileRes.ok) {
+          throw new Error(`Failed to download model ${m.name}`);
+        }
         const blob = await fileRes.blob();
         
         let baseName = m.name.replace(/[^a-z0-9 _-]/gi, '_').trim() || 'model';
@@ -313,12 +330,35 @@ export default function Home() {
         }
         usedNames.add(baseName);
         
-        const safeModelName = baseName + '.nam';
-        const fileHandle = await packHandle.getFileHandle(safeModelName, { create: true });
+        let ext = '.nam';
+        if (m.model_url) {
+          const urlObj = new URL(m.model_url);
+          const pathname = urlObj.pathname;
+          const match = pathname.match(/\.([a-zA-Z0-9]+)$/);
+          if (match) ext = '.' + match[1].toLowerCase();
+        }
         
-        const writable = await fileHandle.createWritable();
-        await writable.write(blob);
-        await writable.close();
+        const safeModelName = baseName + ext;
+        
+        if (packHandle) {
+          const fileHandle = await packHandle.getFileHandle(safeModelName, { create: true });
+          const writable = await fileHandle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+        } else {
+          // Fallback: Browser default download
+          const downloadUrl = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = downloadUrl;
+          a.download = safeModelName;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => URL.revokeObjectURL(downloadUrl), 10000);
+          
+          // Wait a tiny bit to prevent browser from blocking rapid multiple downloads
+          await new Promise(r => setTimeout(r, 500));
+        }
       }
       
       // 5. Update backend tracking
@@ -355,9 +395,9 @@ export default function Home() {
 
   return (
     <main>
-      <div className="header" style={{ marginBottom: '2rem', paddingBottom: '1.5rem', borderBottom: '1px solid var(--surface-border)' }}>
+      <div className="header" style={{ display: 'flex', flexWrap: 'wrap', gap: '1rem', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem', paddingBottom: '1.5rem', borderBottom: '1px solid var(--surface-border)' }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-          <h1 style={{ display: 'flex', alignItems: 'baseline', gap: '1rem', fontSize: '2.5rem', margin: 0 }}>
+          <h1 style={{ display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', gap: '0.5rem', fontSize: '2.5rem', margin: 0 }}>
             ToneManager 
             <span style={{ fontSize: '1.2rem', fontWeight: 'normal', color: 'var(--primary-color)' }}>
               v3.0 PRO
@@ -371,17 +411,24 @@ export default function Home() {
         {isGuest ? (
           <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', background: 'var(--surface-color)', padding: '0.8rem 1.5rem', borderRadius: '50px', border: '1px solid var(--primary-color)' }}>
             <div className="guest-login-msg" style={{ fontSize: '0.95rem', color: 'var(--text-muted)' }}>
-              Login to save favorites and track downloads
+              Login with your Tone3000 account
             </div>
-            <button onClick={() => router.push('/login')} className="action-btn" style={{ background: 'var(--primary-color)', color: '#000', padding: '0.5rem 1.2rem', border: 'none', fontWeight: 'bold' }}>
-              Create Account / Login
-            </button>
+            <a href="/api/auth/tone3000" className="action-btn" style={{ background: 'var(--primary-color)', color: '#000', padding: '0.5rem 1.2rem', border: 'none', fontWeight: 'bold', textDecoration: 'none', display: 'inline-block' }}>
+              Login with Tone3000
+            </a>
           </div>
         ) : (
-          <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', background: 'var(--surface-color)', padding: '0.8rem 1.5rem', borderRadius: '50px', border: '1px solid var(--surface-border)' }}>
+          <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', flexWrap: 'wrap', background: 'var(--surface-color)', padding: '0.8rem 1.5rem', borderRadius: '50px', border: '1px solid var(--surface-border)' }}>
             <div style={{ fontSize: '1.1rem', color: 'var(--text-muted)' }}>
               Welcome, <strong style={{ color: '#fff' }}>{userData.username}</strong>
             </div>
+            
+            {userData.username && userData.tone3000Connected === false && (
+              <a href="/api/auth/tone3000" style={{ background: 'var(--primary-color)', color: '#000', padding: '0.4rem 1rem', borderRadius: '50px', textDecoration: 'none', fontWeight: 'bold', fontSize: '0.9rem', boxShadow: '0 0 10px rgba(102, 252, 241, 0.4)' }}>
+                Connect Tone3000
+              </a>
+            )}
+
             <div style={{ width: '1px', height: '24px', background: 'var(--surface-border)' }}></div>
             <button onClick={handleLogout} className="action-btn" style={{ borderColor: 'transparent', background: 'transparent', padding: '0.2rem', color: '#ff6b6b' }} title="Logout">
               <LogOut size={20} />
@@ -432,9 +479,19 @@ export default function Home() {
           <p style={{ color: 'var(--text-muted)', marginBottom: '2rem', fontSize: '1.2rem', maxWidth: '500px', margin: '0 auto 2rem auto' }}>
             You need an account to view and manage your {activeTab === 'downloads' ? 'download history' : 'favorite models'}.
           </p>
-          <button onClick={() => router.push('/login')} className="search-button" style={{ display: 'inline-block', padding: '1rem 2rem', fontSize: '1.1rem' }}>
-            Create Account / Login
-          </button>
+          <a href="/api/auth/tone3000" className="search-button" style={{ display: 'inline-block', padding: '1rem 2rem', fontSize: '1.1rem', textDecoration: 'none' }}>
+            Login with Tone3000
+          </a>
+        </div>
+      ) : !isGuest && userData.username && userData.tone3000Connected === false ? (
+        <div style={{ textAlign: 'center', padding: '4rem 1rem', background: 'var(--surface-color)', borderRadius: '12px', border: '1px solid rgba(102, 252, 241, 0.4)', marginBottom: '2rem', boxShadow: '0 0 30px rgba(102, 252, 241, 0.1)' }}>
+          <h2 style={{ marginBottom: '1rem', fontSize: '2.5rem', color: 'var(--primary-color)' }}>Connect Tone3000</h2>
+          <p style={{ color: 'var(--text-muted)', marginBottom: '2rem', fontSize: '1.2rem', maxWidth: '600px', margin: '0 auto 2rem auto', lineHeight: 1.6 }}>
+            To comply with Tone3000 API guidelines and enable seamless downloads, you must securely connect your Tone3000 account. This allows you to browse and download models directly to your local folder.
+          </p>
+          <a href="/api/auth/tone3000" className="search-button" style={{ display: 'inline-block', padding: '1rem 2rem', fontSize: '1.2rem', textDecoration: 'none', background: 'var(--primary-color)', color: '#000', fontWeight: 'bold' }}>
+            Link Tone3000 Account Now
+          </a>
         </div>
       ) : (
         <>
@@ -445,6 +502,7 @@ export default function Home() {
               <button className={`filter-btn ${activeCategory === 'amp' ? 'active' : ''}`} onClick={() => setActiveCategory('amp')}>Amp Head</button>
               <button className={`filter-btn ${activeCategory === 'pedal' ? 'active' : ''}`} onClick={() => setActiveCategory('pedal')}>Pedal</button>
               <button className={`filter-btn ${activeCategory === 'outboard' ? 'active' : ''}`} onClick={() => setActiveCategory('outboard')}>Outboard</button>
+              <button className={`filter-btn ${activeCategory === 'ir' ? 'active' : ''}`} onClick={() => setActiveCategory('ir')}>Cabinet / IR</button>
             </div>
 
             <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
@@ -516,7 +574,9 @@ export default function Home() {
                   <div className="model-gear">
                     {model.type}
                     {model.isA2 && <span className="badge">NAM A2</span>}
-                    {!model.isA2 && <span className="badge">NAM</span>}
+                    {model.hasA1 && <span className="badge">NAM A1</span>}
+                    {model.hasIR && <span className="badge">IR</span>}
+                    {!model.isA2 && !model.hasA1 && !model.hasIR && <span className="badge">NAM</span>}
                   </div>
                   
                   <div className="model-stats">
@@ -551,9 +611,9 @@ export default function Home() {
                     <button 
                       className="action-btn" 
                       onClick={() => handleDownload(model)}
-                      disabled={downloadingItems.has(model.id) || !dirHandle}
-                      style={{ color: 'var(--primary-color)', borderColor: 'var(--primary-color)', opacity: dirHandle ? 1 : 0.5 }}
-                      title={!dirHandle ? 'Select a folder above first' : 'Redownload'}
+                      disabled={downloadingItems.has(model.id) || (typeof window !== 'undefined' && 'showDirectoryPicker' in window && !dirHandle)}
+                      style={{ color: 'var(--primary-color)', borderColor: 'var(--primary-color)', opacity: (typeof window !== 'undefined' && 'showDirectoryPicker' in window && !dirHandle) ? 0.5 : 1 }}
+                      title={(typeof window !== 'undefined' && 'showDirectoryPicker' in window && !dirHandle) ? 'Select a folder above first' : 'Redownload'}
                     >
                       {downloadingItems.has(model.id) ? 'Downloading...' : <><CheckCircle size={16} /> Redownload</>}
                     </button>
@@ -561,9 +621,9 @@ export default function Home() {
                     <button 
                       className="action-btn"
                       onClick={() => handleDownload(model)}
-                      disabled={downloadingItems.has(model.id) || !dirHandle}
-                      style={{ opacity: dirHandle ? 1 : 0.5 }}
-                      title={!dirHandle ? 'Select a folder above first' : ''}
+                      disabled={downloadingItems.has(model.id) || (typeof window !== 'undefined' && 'showDirectoryPicker' in window && !dirHandle)}
+                      style={{ opacity: (typeof window !== 'undefined' && 'showDirectoryPicker' in window && !dirHandle) ? 0.5 : 1 }}
+                      title={(typeof window !== 'undefined' && 'showDirectoryPicker' in window && !dirHandle) ? 'Select a folder above first' : ''}
                     >
                       {downloadingItems.has(model.id) ? 'Downloading...' : <><DownloadCloud size={16} /> Download</>}
                     </button>

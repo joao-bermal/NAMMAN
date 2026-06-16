@@ -12,5 +12,9 @@ export async function GET() {
   const user = await getUserData(username);
   if (!user) return NextResponse.json({ authenticated: false }, { status: 401 });
 
-  return NextResponse.json({ authenticated: true, username });
+  return NextResponse.json({ 
+    authenticated: true, 
+    username,
+    tone3000Connected: !!user.tone3000AccessToken
+  });
 }
