@@ -587,23 +587,47 @@ export class T3KClient {
    */
   async fetch(path: string, init?: RequestInit): Promise<Response> {
     const resolve = (p: string) => (/^https?:\/\//.test(p) ? p : `${T3K_API}${p}`);
-    const token = await this.getAccessToken();
-    const res = await globalThis.fetch(resolve(path), {
-      ...init,
-      headers: { ...init?.headers, Authorization: `Bearer ${token}` },
-    });
+    
+    let res!: Response;
+    let retries = 5;
+    let delay = 2000;
 
-    // Retry once on 401 — handles expiry race conditions between refresh check and request
-    if (res.status === 401) {
-      const stored = this.getTokens();
-      if (stored) {
-        this.setTokens({ ...stored, expires_at: 0 }); // force a refresh on next call
-        const retryToken = await this.getAccessToken();
-        return globalThis.fetch(resolve(path), {
-          ...init,
-          headers: { ...init?.headers, Authorization: `Bearer ${retryToken}` },
-        });
+    while (retries >= 0) {
+      const token = await this.getAccessToken();
+      res = await globalThis.fetch(resolve(path), {
+        ...init,
+        headers: { ...init?.headers, Authorization: `Bearer ${token}` },
+      });
+
+      // Retry once on 401 — handles expiry race conditions between refresh check and request
+      if (res.status === 401) {
+        const stored = this.getTokens();
+        if (stored) {
+          this.setTokens({ ...stored, expires_at: 0 }); // force a refresh on next call
+          const retryToken = await this.getAccessToken();
+          res = await globalThis.fetch(resolve(path), {
+            ...init,
+            headers: { ...init?.headers, Authorization: `Bearer ${retryToken}` },
+          });
+        }
       }
+
+      // Handle rate limits automatically
+      if (res.status === 429 && retries > 0) {
+        retries--;
+        let waitMs = delay;
+        const retryAfter = res.headers.get('Retry-After');
+        if (retryAfter) {
+          const parsed = parseInt(retryAfter, 10);
+          if (!isNaN(parsed)) waitMs = Math.max(delay, parsed * 1000);
+        }
+        console.warn(`[T3KClient] Rate limited (429). Retrying in ${waitMs}ms...`);
+        await new Promise(r => setTimeout(r, waitMs));
+        delay *= 2; // exponential backoff
+        continue;
+      }
+
+      break;
     }
 
     return res;

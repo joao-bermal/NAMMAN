@@ -383,7 +383,7 @@ export default function Home() {
       }
 
       const usedNames = new Set<string>();
-      const CHUNK_SIZE = 5;
+      const CHUNK_SIZE = 3; // Reduced to 3 to be gentler on API rate limits
 
       for (let i = 0; i < models.length; i += CHUNK_SIZE) {
         const chunk = models.slice(i, i + CHUNK_SIZE);
@@ -423,6 +423,11 @@ export default function Home() {
             await new Promise(r => setTimeout(r, 400));
           }
         }));
+
+        // Add a small delay between chunks to prevent hitting API rate limits
+        if (i + CHUNK_SIZE < models.length) {
+          await new Promise(r => setTimeout(r, 500));
+        }
       }
 
       await recordDownload(tone);
