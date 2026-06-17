@@ -109,6 +109,7 @@ export default function Home() {
   const [favoriteIds, setFavoriteIds] = useState<Set<number>>(new Set());
   const [downloadHistory, setDownloadHistory] = useState<Tone[]>([]);
   const [downloadingItems, setDownloadingItems] = useState<Set<number>>(new Set());
+  const [autoFavorite, setAutoFavorite] = useState(false);
 
   const [dirHandle, setDirHandle] = useState<FileSystemDirectoryHandle | null>(null);
   const [toasts, setToasts] = useState<{ id: string; message: string; type: 'success' | 'error' | 'info' }[]>([]);
@@ -131,6 +132,19 @@ export default function Home() {
       // no previous handle
     }
   }, []);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('namman_auto_favorite');
+      if (saved) setAutoFavorite(saved === 'true');
+    }
+  }, []);
+
+  const toggleAutoFavorite = () => {
+    const next = !autoFavorite;
+    setAutoFavorite(next);
+    localStorage.setItem('namman_auto_favorite', String(next));
+  };
 
   const selectDirectory = async () => {
     try {
@@ -404,6 +418,9 @@ export default function Home() {
       }
 
       await recordDownload(tone);
+      if (autoFavorite && !favoriteIds.has(tone.id)) {
+        await toggleFavorite(tone);
+      }
       addToast(`Synced "${tone.title}" (${models.length} model${models.length > 1 ? 's' : ''}).`, 'success');
     } catch (err) {
       console.error(err);
@@ -487,6 +504,15 @@ export default function Home() {
               'Select a folder on your computer to enable direct sync.'
             )}
           </p>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginTop: '1.2rem', cursor: 'pointer', color: 'var(--text-muted)', fontSize: '1rem' }}>
+            <input 
+              type="checkbox" 
+              checked={autoFavorite} 
+              onChange={toggleAutoFavorite} 
+              style={{ width: '1.1rem', height: '1.1rem', accentColor: 'var(--primary-color)', cursor: 'pointer' }} 
+            />
+            Automatically favorite downloaded tones
+          </label>
         </div>
         <button onClick={selectDirectory} className="search-button" style={{ background: dirHandle ? 'transparent' : 'var(--primary-color)', color: dirHandle ? 'var(--primary-color)' : '#000', border: dirHandle ? '1px solid var(--primary-color)' : 'none', fontSize: '1.1rem', padding: '1rem 2rem', borderRadius: '8px' }}>
           {dirHandle ? 'Change Folder' : 'Select Local Folder'}
