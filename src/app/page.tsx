@@ -389,38 +389,44 @@ export default function Home() {
         const chunk = models.slice(i, i + CHUNK_SIZE);
         
         await Promise.all(chunk.map(async (m) => {
-          if (!m.model_url) return;
-          const res = await client.fetch(m.model_url);
-          if (!res.ok) throw new Error(`Failed to download ${m.name} (${res.status})`);
-          const blob = await res.blob();
+          try {
+            if (!m.model_url) return;
+            const res = await client.fetch(m.model_url);
+            if (!res.ok) throw new Error(`Failed to download ${m.name} (${res.status})`);
+            const blob = await res.blob();
 
-          let base = (m.name || 'model').replace(/[^a-z0-9 _-]/gi, '_').trim() || 'model';
-          // Models are deduplicated by name, so race conditions here are extremely rare,
-          // but we still ensure unique bases per file.
-          if (usedNames.has(base)) {
-            let j = 2;
-            while (usedNames.has(`${base}_${j}`)) j++;
-            base = `${base}_${j}`;
-          }
-          usedNames.add(base);
+            let base = (m.name || 'model').replace(/[^a-z0-9 _-]/gi, '_').trim() || 'model';
+            // Models are deduplicated by name, so race conditions here are extremely rare,
+            // but we still ensure unique bases per file.
+            if (usedNames.has(base)) {
+              let j = 2;
+              while (usedNames.has(`${base}_${j}`)) j++;
+              base = `${base}_${j}`;
+            }
+            usedNames.add(base);
 
-          const ext = (new URL(m.model_url).pathname.match(/\.([a-z0-9]+)$/i)?.[0] ?? '.nam').toLowerCase();
-          const filename = base + ext;
+            const ext = (new URL(m.model_url).pathname.match(/\.([a-z0-9]+)$/i)?.[0] ?? '.nam').toLowerCase();
+            const filename = base + ext;
 
-          if (packHandle) {
-            const fileHandle = await packHandle.getFileHandle(filename, { create: true });
-            const writable = await fileHandle.createWritable();
-            await writable.write(blob);
-            await writable.close();
-          } else {
-            // Fallback: browser download (no File System Access API)
-            const url = URL.createObjectURL(blob);
-            const a = Object.assign(document.createElement('a'), { href: url, download: filename });
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            setTimeout(() => URL.revokeObjectURL(url), 10_000);
-            await new Promise(r => setTimeout(r, 400));
+            if (packHandle) {
+              const fileHandle = await packHandle.getFileHandle(filename, { create: true });
+              const writable = await fileHandle.createWritable();
+              await writable.write(blob);
+              await writable.close();
+            } else {
+              // Fallback: browser download (no File System Access API)
+              const url = URL.createObjectURL(blob);
+              const a = Object.assign(document.createElement('a'), { href: url, download: filename });
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
+              setTimeout(() => URL.revokeObjectURL(url), 10_000);
+              await new Promise(r => setTimeout(r, 400));
+            }
+          } catch (err) {
+            console.error(`Error downloading model ${m.name}:`, err);
+            // We deliberately swallow the error so that one broken model 
+            // doesn't cancel the entire pack's download.
           }
         }));
 
