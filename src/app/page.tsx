@@ -1,556 +1,543 @@
 'use client';
 
+/* This page intentionally synchronizes React state from external systems inside
+ * effects — the OAuth callback / connection bootstrap on mount, and re-fetching
+ * tones when the active tab or filters change. These are valid effect uses, so
+ * the React-Compiler set-state-in-effect heuristic is disabled for this file. */
+/* eslint-disable react-hooks/set-state-in-effect */
+
 import { useState, useEffect, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
-import { DownloadCloud, CheckCircle, Bookmark, Folder, PlayCircle, FolderOpen, ExternalLink, LogOut } from 'lucide-react';
+import { DownloadCloud, CheckCircle, Bookmark, Folder, FolderOpen, ExternalLink, LogOut } from 'lucide-react';
 import { get, set } from 'idb-keyval';
 
+import { PUBLISHABLE_KEY, getRedirectUri } from '@/lib/tone3000/config';
+import {
+  T3KClient,
+  startStandardFlow,
+  handleOAuthCallback,
+} from '@/lib/tone3000/tone3000-client';
+import { Gear, TonesSort, type Tone, type Model, type ArchitectureVersion } from '@/lib/tone3000/types';
+
+// Single client instance. Tokens live in sessionStorage (see T3KClient).
+// onAuthRequired fires when tokens are missing/expired beyond refresh — we
+// silently restart the OAuth flow (no login screen if the TONE3000 session
+// is still active).
+const client = new T3KClient(PUBLISHABLE_KEY, () => {
+  if (typeof window !== 'undefined') startStandardFlow(PUBLISHABLE_KEY, getRedirectUri());
+});
+
+const DOWNLOAD_HISTORY_KEY = 't3k_download_history';
+const DIR_HANDLE_KEY = 'nam_profiles_handle';
+const PAGE_SIZE = 15;
+
+// The API's `tone.url` can come back malformed (e.g. `https://www.tone3000.com//<slug>-<id>`
+// missing the `/tones/` segment), so rebuild the canonical public URL from its slug.
+const toneHref = (tone: Tone): string => {
+  try {
+    const slug = new URL(tone.url).pathname.replace(/^\/+/, '').replace(/^tones\//, '');
+    return `https://www.tone3000.com/tones/${slug}`;
+  } catch {
+    return tone.url;
+  }
+};
+
+const gearLabel = (gear: string): string =>
+  gear === 'full-rig' ? 'Full Rig'
+    : gear === 'amp' ? 'Amp Head'
+    : gear === 'pedal' ? 'Pedal'
+    : gear === 'ir' ? 'Cabinet / IR'
+    : 'Outboard';
+
+const gearFolder = (gear: string): string =>
+  gear === 'full-rig' ? 'FullRig'
+    : gear === 'amp' ? 'Amps'
+    : gear === 'pedal' ? 'Pedals'
+    : gear === 'ir' ? 'Cabinets_IRs'
+    : 'Outboard';
+
+const sortMap: Record<string, TonesSort> = {
+  trending: TonesSort.Trending,
+  newest: TonesSort.Newest,
+  oldest: TonesSort.Oldest,
+  downloads: TonesSort.DownloadsAllTime,
+  'best-match': TonesSort.BestMatch,
+};
+
+type Tab = 'search' | 'favorites' | 'downloads';
+
+// The File System Access API permission methods aren't in the default TS DOM
+// lib yet, so we narrow to the bits we use.
+type FsPermissionDescriptor = { mode?: 'read' | 'readwrite' };
+interface DirectoryHandleWithPermissions extends FileSystemDirectoryHandle {
+  queryPermission(descriptor?: FsPermissionDescriptor): Promise<PermissionState>;
+  requestPermission(descriptor?: FsPermissionDescriptor): Promise<PermissionState>;
+}
+type DirectoryPickerWindow = Window & {
+  showDirectoryPicker(options?: FsPermissionDescriptor): Promise<FileSystemDirectoryHandle>;
+};
+
 export default function Home() {
-  const router = useRouter();
+  const [connected, setConnected] = useState<boolean | null>(null);
+  const [username, setUsername] = useState('');
+  const [authError, setAuthError] = useState('');
+
   const [query, setQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
-  const [results, setResults] = useState<any[]>([]);
-  const [downloadingItems, setDownloadingItems] = useState<Set<number>>(new Set());
-  const [toasts, setToasts] = useState<{id: string, message: string, type: 'success' | 'error' | 'info'}[]>([]);
+  const [results, setResults] = useState<Tone[]>([]);
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
-  const [dirHandle, setDirHandle] = useState<any>(null);
-  const [isGuest, setIsGuest] = useState(false);
-  const [activeTab, setActiveTab] = useState<'search' | 'downloads' | 'favorites'>('search');
-  const [activeCategory, setActiveCategory] = useState<string>('');
-  const [activeArchitecture, setActiveArchitecture] = useState<string>('2'); // Default A2
-  const [sortBy, setSortBy] = useState<string>('trending');
-  
-  // User Data State
-  const [userData, setUserData] = useState<any>({ settings: {}, favorites: [], downloads: [], username: '' });
 
-  const addToast = (message: string, type: 'success' | 'error' | 'info') => {
+  const [activeTab, setActiveTab] = useState<Tab>('search');
+  const [activeCategory, setActiveCategory] = useState<string>('');
+  const [activeArchitecture, setActiveArchitecture] = useState<string>('2');
+  const [sortBy, setSortBy] = useState<string>('trending');
+
+  const [favoriteIds, setFavoriteIds] = useState<Set<number>>(new Set());
+  const [downloadHistory, setDownloadHistory] = useState<Tone[]>([]);
+  const [downloadingItems, setDownloadingItems] = useState<Set<number>>(new Set());
+
+  const [dirHandle, setDirHandle] = useState<FileSystemDirectoryHandle | null>(null);
+  const [toasts, setToasts] = useState<{ id: string; message: string; type: 'success' | 'error' | 'info' }[]>([]);
+
+  const addToast = useCallback((message: string, type: 'success' | 'error' | 'info') => {
     const id = Math.random().toString(36).substring(2, 9);
     setToasts(prev => [...prev, { id, message, type }]);
-    setTimeout(() => {
-      setToasts(prev => prev.filter(t => t.id !== id));
-    }, 5000);
-  };
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 5000);
+  }, []);
 
-  const checkAuth = async () => {
+  // ── Local folder (File System Access API) ─────────────────────────────────
+  const loadDirHandle = useCallback(async () => {
     try {
-      const res = await fetch(`/api/auth/me?_=${Date.now()}`, { cache: 'no-store' });
-      if (res.status === 401) {
-        setIsGuest(true);
-        return false;
-      }
-      return true;
-    } catch (e) {
-      setIsGuest(true);
-      return false;
-    }
-  };
-
-  const loadDirHandle = async () => {
-    try {
-      const handle = await get('nam_profiles_handle');
+      const handle = await get<FileSystemDirectoryHandle>(DIR_HANDLE_KEY);
       if (handle) {
-        // Request permission silently
-        const permission = await handle.queryPermission({ mode: 'readwrite' });
-        if (permission === 'granted') {
-          setDirHandle(handle);
-        }
+        const permission = await (handle as DirectoryHandleWithPermissions).queryPermission({ mode: 'readwrite' });
+        if (permission === 'granted') setDirHandle(handle);
       }
-    } catch (e) {
-      console.log('No previous dir handle found');
+    } catch {
+      // no previous handle
     }
-  };
+  }, []);
 
   const selectDirectory = async () => {
     try {
       if (!('showDirectoryPicker' in window)) {
-        alert('Your browser does not support native folder selection. Use Google Chrome or Edge.');
+        addToast('Your browser does not support folder selection. Use Chrome or Edge.', 'error');
         return;
       }
-      
-      const handle = await (window as any).showDirectoryPicker({ mode: 'readwrite' });
-      await set('nam_profiles_handle', handle);
+      const handle = await (window as unknown as DirectoryPickerWindow).showDirectoryPicker({ mode: 'readwrite' });
+      await set(DIR_HANDLE_KEY, handle);
       setDirHandle(handle);
-    } catch (e) {
-      console.log('Folder selection cancelled or failed', e);
+    } catch {
+      // cancelled
     }
   };
 
-  const fetchUserData = async () => {
+  // ── Auth / bootstrap ──────────────────────────────────────────────────────
+  const loadFavoriteIds = useCallback(async () => {
     try {
-      const res = await fetch(`/api/user?_=${Date.now()}`, { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success) {
-          setUserData({ ...data.data, username: data.username || 'admin' });
-        }
-      }
-    } catch (e) {
-      console.error(e);
+      const ids = new Set<number>();
+      let page = 1;
+      let pages = 1;
+      do {
+        const res = await client.listFavoritedTones({ page, pageSize: 100 });
+        res.data.forEach(t => ids.add(t.id));
+        pages = res.total_pages || 1;
+        page += 1;
+      } while (page <= pages && page <= 10);
+      setFavoriteIds(ids);
+    } catch {
+      // Non-fatal — bookmark state just won't be pre-filled
     }
+  }, []);
+
+  const bootstrapConnected = useCallback(async () => {
+    setConnected(true);
+    try {
+      const user = await client.getUser();
+      setUsername(user.username);
+    } catch {
+      // ignore — name is cosmetic
+    }
+    loadFavoriteIds();
+    get<Tone[]>(DOWNLOAD_HISTORY_KEY).then(h => h && setDownloadHistory(h));
+    loadDirHandle();
+  }, [loadFavoriteIds, loadDirHandle]);
+
+  useEffect(() => {
+    if (!PUBLISHABLE_KEY) {
+      setAuthError('Missing NEXT_PUBLIC_TONE3000_CLIENT_ID. Add your publishable key to .env.');
+      setConnected(false);
+      return;
+    }
+
+    const params = new URLSearchParams(window.location.search);
+    const hasCallback = params.has('code') || params.has('error') || params.has('state');
+
+    if (hasCallback) {
+      handleOAuthCallback(PUBLISHABLE_KEY, getRedirectUri()).then(result => {
+        // Clean the OAuth params out of the URL regardless of outcome
+        window.history.replaceState({}, '', window.location.pathname);
+        if (result.ok) {
+          client.setTokens(result.tokens);
+          bootstrapConnected();
+        } else if (result.error === 'canceled') {
+          setConnected(client.isConnected());
+          if (client.isConnected()) bootstrapConnected();
+        } else {
+          setAuthError(`Connection failed: ${result.error}`);
+          setConnected(client.isConnected());
+        }
+      });
+      return;
+    }
+
+    if (client.isConnected()) {
+      bootstrapConnected();
+    } else {
+      setConnected(false);
+    }
+  }, [bootstrapConnected]);
+
+  const connect = () => startStandardFlow(PUBLISHABLE_KEY, getRedirectUri());
+
+  const disconnect = () => {
+    client.clearTokens();
+    setConnected(false);
+    setUsername('');
+    setResults([]);
+    setFavoriteIds(new Set());
+    setActiveTab('search');
+    addToast('Disconnected from TONE3000', 'success');
   };
 
-  const fetchResults = useCallback(async (searchTerm: string, page: number, tab: string, category: string, sort: string, architecture: string) => {
+  // ── Data fetching ─────────────────────────────────────────────────────────
+  const fetchResults = useCallback(async (tab: Tab, searchTerm: string, page: number, category: string, sort: string, architecture: string) => {
+    if (tab === 'downloads') {
+      const history = (await get<Tone[]>(DOWNLOAD_HISTORY_KEY)) ?? [];
+      setDownloadHistory(history);
+      setResults(history);
+      setTotalPages(1);
+      return;
+    }
+
     setIsSearching(true);
     try {
-      if (tab === 'downloads' || tab === 'favorites') {
-        const idsToFetch = tab === 'downloads' ? userData.downloads : userData.favorites;
-        if (!idsToFetch || idsToFetch.length === 0) {
-          setResults([]);
-          setTotalPages(1);
-          setIsSearching(false);
-          return;
+      if (tab === 'favorites') {
+        const res = await client.listFavoritedTones({ page, pageSize: PAGE_SIZE });
+        let data = res.data;
+        if (architecture === '2') {
+          data = data.filter(t => (t.a2_models_count ?? 0) > 0);
+        } else if (architecture === '1') {
+          data = data.filter(t => (t.a1_models_count ?? 0) > 0);
         }
-
-        const res = await fetch('/api/tones', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ids: idsToFetch })
-        });
-        const data = await res.json();
-        if (data.success) {
-          let mapped = data.items.map((item: any) => ({
-            id: item.id,
-            name: item.title,
-            slug: item.slug || item.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)+/g, ''),
-            author: item.username,
-            avatar_url: item.avatar_url,
-            isA2: item.a2_models_count > 0,
-            models_count: item.models_count,
-            downloads_count: item.downloads_count,
-            favorites_count: item.favorites_count,
-            created_at: new Date(item.created_at).toLocaleDateString(),
-            image: item.images && item.images.length > 0 ? item.images[0] : null,
-            type: item.gear === 'full-rig' ? 'Full Rig' : item.gear === 'amp' ? 'Amp Head' : item.gear === 'pedal' ? 'Pedal' : item.gear === 'ir' ? 'Cabinet / IR' : 'Outboard'
-          }));
-          
-          if (category) {
-            mapped = mapped.filter((m: any) => 
-              m.type.toLowerCase().replace(' ', '-') === category || 
-              (category === 'full-rig' && m.type === 'Full Rig') || 
-              (category === 'amp' && m.type === 'Amp Head') ||
-              (category === 'ir' && m.type === 'Cabinet / IR')
-            );
-          }
-          if (architecture === '2') {
-            mapped = mapped.filter((m: any) => m.isA2);
-          } else if (architecture === '1') {
-            mapped = mapped.filter((m: any) => m.hasA1);
-          }
-          if (sort === 'newest') mapped.sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-          if (sort === 'oldest') mapped.sort((a: any, b: any) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
-          if (sort === 'downloads' || sort === 'trending') mapped.sort((a: any, b: any) => b.downloads_count - a.downloads_count);
-
-          setResults(mapped);
-          setTotalPages(1);
-        } else {
-          setResults([]);
-          setTotalPages(1);
-        }
+        setResults(data);
+        setTotalPages(res.total_pages || 1);
       } else {
-        const payload: any = {
-          query_term: searchTerm,
-          page_number: page,
-          page_size: 15,
-          order_by: sort === 'downloads' ? 'downloads-all-time' : sort,
-          tag_names: null,
-          make_names: null,
-          gear_filters: category ? [category] : null,
-          is_calibrated: false,
-          size_filters: null,
-          usernames: null
-        };
-        if (architecture) {
-          payload.architecture_filter = architecture;
-        }
-
-        const res = await fetch('/api/search', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
+        const res = await client.searchTones({
+          query: searchTerm || undefined,
+          page,
+          pageSize: PAGE_SIZE,
+          sort: sortMap[sort] ?? TonesSort.Trending,
+          gears: category ? [category as Gear] : undefined,
+          architecture: (architecture || undefined) as ArchitectureVersion | undefined,
         });
-
-        const data = await res.json();
         
-        if (res.ok && data.success && data.items) {
-          const totalCount = data.items[0]?.total_count || 0;
-          setTotalPages(Math.max(1, Math.ceil(totalCount / 15)));
-
-          const mappedResults = data.items.map((item: any) => ({
-            id: item.id,
-            name: item.title,
-            slug: item.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)+/g, ''),
-            author: item.user?.username || item.username,
-            avatar_url: item.user?.avatar_url || item.avatar_url,
-            isA2: item.a2_models_count > 0,
-            hasA1: item.a1_models_count > 0,
-            hasIR: item.irs_count > 0,
-            models_count: item.models_count,
-            downloads_count: item.downloads_count,
-            favorites_count: item.favorites_count,
-            created_at: new Date(item.created_at).toLocaleDateString(),
-            image: item.images && item.images.length > 0 ? item.images[0] : null,
-            type: item.gear === 'full-rig' ? 'Full Rig' : item.gear === 'amp' ? 'Amp Head' : item.gear === 'pedal' ? 'Pedal' : item.gear === 'ir' ? 'Cabinet / IR' : 'Outboard'
-          }));
-          
-          if (architecture === '2') {
-            mappedResults = mappedResults.filter((m: any) => m.isA2);
-          } else if (architecture === '1') {
-            mappedResults = mappedResults.filter((m: any) => m.hasA1);
-          }
-
-          setResults(mappedResults);
-        } else {
-          if (res.status === 401 || res.status === 403) {
-            alert("Your Tone3000 session has expired. Reconnecting...");
-            window.location.href = '/api/auth/tone3000';
-            return;
-          }
-          setResults([]);
-          setTotalPages(1);
+        let data = res.data;
+        if (architecture === '2') {
+          data = data.filter(t => (t.a2_models_count ?? 0) > 0);
+        } else if (architecture === '1') {
+          data = data.filter(t => (t.a1_models_count ?? 0) > 0);
         }
+        
+        setResults(data);
+        setTotalPages(res.total_pages || 1);
       }
     } catch (err) {
       console.error(err);
+      addToast('Failed to load tones from TONE3000.', 'error');
+      setResults([]);
+      setTotalPages(1);
     } finally {
       setIsSearching(false);
     }
-  }, [userData]);
+  }, [addToast]);
 
   useEffect(() => {
-    checkAuth().then(isOk => {
-      if (isOk) {
-        fetchUserData();
-        loadDirHandle();
-      }
-    });
-  }, []);
-
-  useEffect(() => {
-    if (!isGuest || activeTab === 'search') {
-      fetchResults(query, currentPage, activeTab, activeCategory, sortBy, activeArchitecture);
+    if (connected) {
+      // Re-fetch when the tab/filters/page change. `query` is applied only via
+      // handleSearch so typing doesn't fire a request per keystroke.
+      void fetchResults(activeTab, query, currentPage, activeCategory, sortBy, activeArchitecture);
     }
-  }, [currentPage, fetchResults, isGuest, activeTab, activeCategory, sortBy, activeArchitecture]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connected, activeTab, currentPage, activeCategory, sortBy, activeArchitecture, fetchResults]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
     setCurrentPage(1);
-    fetchResults(query, 1, activeTab, activeCategory, sortBy, activeArchitecture);
+    fetchResults('search', query, 1, activeCategory, sortBy, activeArchitecture);
   };
 
-  const toggleFavorite = async (id: number) => {
-    if (isGuest) {
-      addToast('🔒 Please login or create an account to save favorites!', 'info');
-      return;
-    }
-    setUserData((prev: any) => ({
-      ...prev,
-      favorites: prev.favorites.includes(id) 
-        ? prev.favorites.filter((fid: number) => fid !== id)
-        : [...prev.favorites, id]
-    }));
+  // ── Favorites (synced to TONE3000) ────────────────────────────────────────
+  const toggleFavorite = async (tone: Tone) => {
+    const id = tone.id;
+    const wasFavorited = favoriteIds.has(id);
+    setFavoriteIds(prev => {
+      const next = new Set(prev);
+      if (wasFavorited) next.delete(id); else next.add(id);
+      return next;
+    });
 
     try {
-      await fetch('/api/user/favorites', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ toneId: id })
+      if (wasFavorited) await client.unfavoriteTone(id);
+      else await client.favoriteTone(id);
+
+      if (activeTab === 'favorites' && wasFavorited) {
+        setResults(prev => prev.filter(t => t.id !== id));
+      }
+    } catch (err) {
+      console.error(err);
+      addToast('Could not update favorite on TONE3000.', 'error');
+      setFavoriteIds(prev => {
+        const next = new Set(prev);
+        if (wasFavorited) next.add(id); else next.delete(id);
+        return next;
       });
-    } catch (e) {
-      console.error(e);
     }
   };
 
-  const handleDownload = async (model: any) => {
-    const isFileSystemSupported = typeof window !== 'undefined' && 'showDirectoryPicker' in window;
-    
-    if (isFileSystemSupported && !dirHandle) {
-      alert('Please select a local folder using the button above first.');
+  // ── File sync (core feature) ──────────────────────────────────────────────
+  const recordDownload = async (tone: Tone) => {
+    const history = (await get<Tone[]>(DOWNLOAD_HISTORY_KEY)) ?? [];
+    const next = [tone, ...history.filter(t => t.id !== tone.id)];
+    await set(DOWNLOAD_HISTORY_KEY, next);
+    setDownloadHistory(next);
+  };
+
+  const handleDownload = async (tone: Tone) => {
+    const fsSupported = typeof window !== 'undefined' && 'showDirectoryPicker' in window;
+    if (fsSupported && !dirHandle) {
+      addToast('Select a local folder above first.', 'info');
       return;
     }
 
-    setDownloadingItems(prev => new Set(prev).add(model.id));
-    
+    setDownloadingItems(prev => new Set(prev).add(tone.id));
     try {
-      // 1. Get permissions explicitly if not granted
       if (dirHandle) {
-        const perm = await dirHandle.requestPermission({ mode: 'readwrite' });
+        const perm = await (dirHandle as DirectoryHandleWithPermissions).requestPermission({ mode: 'readwrite' });
         if (perm !== 'granted') {
-          alert('Write permission to the folder was denied.');
+          addToast('Write permission to the folder was denied.', 'error');
           return;
         }
       }
-      // 2. Fetch models URLs from backend proxy
-      const res = await fetch(`/api/models?tone_id=${model.id}`);
-      const data = await res.json();
-      
-      if (!data.success || !data.models || data.models.length === 0) {
-        alert('No models found for this capture.');
-        setDownloadingItems(prev => { const n = new Set(prev); n.delete(model.id); return n; });
-        return;
+
+      // Pull legacy (A1 + Custom) and A2 models, then merge — the API has no
+      // single "all architectures" view.
+      const [legacy, a2] = await Promise.all([
+        client.listModels(tone.id, { pageSize: 100 }),
+        client.listModels(tone.id, { pageSize: 100, architecture: 2 }),
+      ]);
+      let models: Model[] = [...legacy.data, ...a2.data];
+
+      // Filter by the selected architecture (keep IRs/non-NAM regardless).
+      if (activeArchitecture) {
+        models = models.filter(m => m.architecture_version == null || String(m.architecture_version) === activeArchitecture);
       }
 
-      // 3. Create subdirectories
-      const safeToneName = model.name.replace(/[^a-z0-9 _-]/gi, '_').trim() || 'Unnamed_Pack';
-      const categoryFolderName = model.type === 'Full Rig' ? 'FullRig' : model.type === 'Amp Head' ? 'Amps' : model.type === 'Pedal' ? 'Pedals' : model.type === 'Cabinet / IR' ? 'Cabinets_IRs' : 'Outboard';
-      
-      let packHandle: any = null;
-      if (dirHandle) {
-        const categoryHandle = await dirHandle.getDirectoryHandle(categoryFolderName, { create: true });
-        packHandle = await categoryHandle.getDirectoryHandle(safeToneName, { create: true });
-      }
-
-      // 4. Filter by architecture and deduplicate models
-      let filteredModels = data.models;
-      if (activeArchitecture === '1') {
-        filteredModels = data.models.filter((m: any) => m.model_url?.toLowerCase().endsWith('.wav') || String(m.architecture_version || '1') === '1');
-      } else if (activeArchitecture === '2') {
-        filteredModels = data.models.filter((m: any) => m.model_url?.toLowerCase().endsWith('.wav') || String(m.architecture_version) === '2');
-      }
-
-      const nameToHighestArch = new Map<string, any>();
-      for (const m of filteredModels) {
-        const arch = String(m.architecture_version || '1');
-        const existing = nameToHighestArch.get(m.name);
-        if (!existing || arch > String(existing.architecture_version || '1')) {
-          nameToHighestArch.set(m.name, m);
+      // Deduplicate by name, keeping the highest architecture.
+      const byName = new Map<string, Model>();
+      for (const m of models) {
+        const existing = byName.get(m.name);
+        if (!existing || String(m.architecture_version ?? '1') > String(existing.architecture_version ?? '1')) {
+          byName.set(m.name, m);
         }
       }
-      filteredModels = Array.from(nameToHighestArch.values());
+      models = Array.from(byName.values());
 
-      if (filteredModels.length === 0) {
-        alert('No models matching the selected architecture were found in this pack.');
-        setDownloadingItems(prev => { const n = new Set(prev); n.delete(model.id); return n; });
+      if (models.length === 0) {
+        addToast('No models matched the selected architecture.', 'info');
         return;
+      }
+
+      // Target folder: <root>/<Category>/<Pack name>/
+      const safePack = (tone.title || 'Unnamed_Pack').replace(/[^a-z0-9 _-]/gi, '_').trim();
+      let packHandle: FileSystemDirectoryHandle | null = null;
+      if (dirHandle) {
+        const categoryHandle = await dirHandle.getDirectoryHandle(gearFolder(tone.gear), { create: true });
+        packHandle = await categoryHandle.getDirectoryHandle(safePack, { create: true });
       }
 
       const usedNames = new Set<string>();
-      for (const m of filteredModels) {
+      for (const m of models) {
         if (!m.model_url) continue;
-        
-        const fileRes = await fetch(`/api/download?url=${encodeURIComponent(m.model_url)}`);
-        if (!fileRes.ok) {
-          throw new Error(`Failed to download model ${m.name}`);
-        }
-        const blob = await fileRes.blob();
-        
-        let baseName = m.name.replace(/[^a-z0-9 _-]/gi, '_').trim() || 'model';
-        if (usedNames.has(baseName)) {
+        const res = await client.fetch(m.model_url);
+        if (!res.ok) throw new Error(`Failed to download ${m.name} (${res.status})`);
+        const blob = await res.blob();
+
+        let base = (m.name || 'model').replace(/[^a-z0-9 _-]/gi, '_').trim() || 'model';
+        if (usedNames.has(base)) {
           let i = 2;
-          while (usedNames.has(`${baseName}_${i}`)) i++;
-          baseName = `${baseName}_${i}`;
+          while (usedNames.has(`${base}_${i}`)) i++;
+          base = `${base}_${i}`;
         }
-        usedNames.add(baseName);
-        
-        let ext = '.nam';
-        if (m.model_url) {
-          const urlObj = new URL(m.model_url);
-          const pathname = urlObj.pathname;
-          const match = pathname.match(/\.([a-zA-Z0-9]+)$/);
-          if (match) ext = '.' + match[1].toLowerCase();
-        }
-        
-        const safeModelName = baseName + ext;
-        
+        usedNames.add(base);
+
+        const ext = (new URL(m.model_url).pathname.match(/\.([a-z0-9]+)$/i)?.[0] ?? '.nam').toLowerCase();
+        const filename = base + ext;
+
         if (packHandle) {
-          const fileHandle = await packHandle.getFileHandle(safeModelName, { create: true });
+          const fileHandle = await packHandle.getFileHandle(filename, { create: true });
           const writable = await fileHandle.createWritable();
           await writable.write(blob);
           await writable.close();
         } else {
-          // Fallback: Browser default download
-          const downloadUrl = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = downloadUrl;
-          a.download = safeModelName;
+          // Fallback: browser download (no File System Access API)
+          const url = URL.createObjectURL(blob);
+          const a = Object.assign(document.createElement('a'), { href: url, download: filename });
           document.body.appendChild(a);
           a.click();
           a.remove();
-          setTimeout(() => URL.revokeObjectURL(downloadUrl), 10000);
-          
-          // Wait a tiny bit to prevent browser from blocking rapid multiple downloads
-          await new Promise(r => setTimeout(r, 500));
+          setTimeout(() => URL.revokeObjectURL(url), 10_000);
+          await new Promise(r => setTimeout(r, 400));
         }
       }
-      
-      // 5. Update backend tracking
-      if (userData?.username) {
-        await fetch('/api/user/downloads', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ toneId: model.id })
-        });
-        setUserData((prev: any) => ({ ...prev, downloads: [...(prev.downloads || []), model.id] }));
-      }
-      
-      addToast(`✅ Pack "${model.name}" downloaded successfully!`, 'success');
 
+      await recordDownload(tone);
+      addToast(`Synced "${tone.title}" (${models.length} model${models.length > 1 ? 's' : ''}).`, 'success');
     } catch (err) {
       console.error(err);
-      addToast(`❌ Error downloading pack "${model.name}".`, 'error');
+      addToast(`Error syncing "${tone.title}".`, 'error');
     } finally {
-      setDownloadingItems(prev => { const n = new Set(prev); n.delete(model.id); return n; });
+      setDownloadingItems(prev => {
+        const n = new Set(prev);
+        n.delete(tone.id);
+        return n;
+      });
     }
   };
 
-  const handleLogout = async () => {
-    try {
-      await fetch('/api/auth/logout', { method: 'POST' });
-      setIsGuest(true);
-      setUserData({ settings: {}, favorites: [], downloads: [], username: '' });
-      setActiveTab('search'); // Reset to search tab to avoid showing locked screens unnecessarily
-      addToast('Logged out successfully', 'success');
-    } catch (e) {
-      console.error(e);
-    }
-  };
+  // ── Render ────────────────────────────────────────────────────────────────
+  if (connected === null) {
+    return (
+      <main>
+        <div style={{ textAlign: 'center', padding: '6rem 1rem', color: 'var(--text-muted)' }}>Loading…</div>
+      </main>
+    );
+  }
+
+  if (!connected) {
+    return (
+      <main>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '70vh', textAlign: 'center', gap: '1.5rem' }}>
+          <div>
+            <h1 style={{ fontSize: '2.8rem', margin: 0 }}>ToneManager</h1>
+            <p style={{ color: 'var(--text-muted)', fontSize: '1.2rem', marginTop: '0.5rem', maxWidth: '560px' }}>
+              Browse, favorite and <strong>sync NAM models</strong> from{' '}
+              <a href="https://www.tone3000.com" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--primary-color)', textDecoration: 'none' }}>TONE3000</a>{' '}
+              straight to a local folder on your machine.
+            </p>
+          </div>
+          {authError && (
+            <div style={{ background: 'rgba(255,0,0,0.1)', border: '1px solid rgba(255,0,0,0.3)', color: '#ff6b6b', padding: '1rem 1.5rem', borderRadius: '8px', maxWidth: '560px' }}>
+              {authError}
+            </div>
+          )}
+          <button
+            onClick={connect}
+            disabled={!PUBLISHABLE_KEY}
+            className="search-button"
+            style={{ background: 'var(--primary-color)', color: '#000', border: 'none', fontWeight: 'bold', fontSize: '1.1rem', padding: '1rem 2.5rem', borderRadius: '8px', opacity: PUBLISHABLE_KEY ? 1 : 0.5 }}
+          >
+            Connect with TONE3000
+          </button>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main>
       <div className="header" style={{ display: 'flex', flexWrap: 'wrap', gap: '1rem', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem', paddingBottom: '1.5rem', borderBottom: '1px solid var(--surface-border)' }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-          <h1 style={{ display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', gap: '0.5rem', fontSize: '2.5rem', margin: 0 }}>
-            ToneManager 
-            <span style={{ fontSize: '1.2rem', fontWeight: 'normal', color: 'var(--primary-color)' }}>
-              v3.0 PRO
-            </span>
-          </h1>
+          <h1 style={{ fontSize: '2.5rem', margin: 0 }}>ToneManager</h1>
           <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: '1.1rem' }}>
-            A tool to help you organize NAM profiles from <a href="https://www.tone3000.com" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--primary-color)', textDecoration: 'none', fontWeight: 'bold' }}>tone3000</a>.
+            Syncing NAM profiles from{' '}
+            <a href="https://www.tone3000.com" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--primary-color)', textDecoration: 'none', fontWeight: 'bold' }}>tone3000</a>.
           </p>
         </div>
-        
-        {isGuest ? (
-          <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', background: 'var(--surface-color)', padding: '0.8rem 1.5rem', borderRadius: '50px', border: '1px solid var(--primary-color)' }}>
-            <div className="guest-login-msg" style={{ fontSize: '0.95rem', color: 'var(--text-muted)' }}>
-              Login with your Tone3000 account
-            </div>
-            <a href="/api/auth/tone3000" className="action-btn" style={{ background: 'var(--primary-color)', color: '#000', padding: '0.5rem 1.2rem', border: 'none', fontWeight: 'bold', textDecoration: 'none', display: 'inline-block' }}>
-              Login with Tone3000
-            </a>
+        <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', flexWrap: 'wrap', background: 'var(--surface-color)', padding: '0.8rem 1.5rem', borderRadius: '50px', border: '1px solid var(--surface-border)' }}>
+          <div style={{ fontSize: '1.1rem', color: 'var(--text-muted)' }}>
+            Connected{username ? <> as <strong style={{ color: '#fff' }}>{username}</strong></> : ''}
           </div>
-        ) : (
-          <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', flexWrap: 'wrap', background: 'var(--surface-color)', padding: '0.8rem 1.5rem', borderRadius: '50px', border: '1px solid var(--surface-border)' }}>
-            <div style={{ fontSize: '1.1rem', color: 'var(--text-muted)' }}>
-              Welcome, <strong style={{ color: '#fff' }}>{userData.username}</strong>
-            </div>
-            
-            {userData.username && userData.tone3000Connected === false && (
-              <a href="/api/auth/tone3000" style={{ background: 'var(--primary-color)', color: '#000', padding: '0.4rem 1rem', borderRadius: '50px', textDecoration: 'none', fontWeight: 'bold', fontSize: '0.9rem', boxShadow: '0 0 10px rgba(102, 252, 241, 0.4)' }}>
-                Connect Tone3000
-              </a>
-            )}
-
-            <div style={{ width: '1px', height: '24px', background: 'var(--surface-border)' }}></div>
-            <button onClick={handleLogout} className="action-btn" style={{ borderColor: 'transparent', background: 'transparent', padding: '0.2rem', color: '#ff6b6b' }} title="Logout">
-              <LogOut size={20} />
-            </button>
-          </div>
-        )}
+          <div style={{ width: '1px', height: '24px', background: 'var(--surface-border)' }} />
+          <button onClick={disconnect} className="action-btn" style={{ borderColor: 'transparent', background: 'transparent', padding: '0.2rem', color: '#ff6b6b' }} title="Disconnect">
+            <LogOut size={20} />
+          </button>
+        </div>
       </div>
 
-      <div className="glass-panel" style={{ padding: '2rem', marginBottom: '3rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', border: dirHandle ? '1px solid var(--primary-color)' : '1px solid var(--surface-border)' }}>
+      <div className="glass-panel" style={{ padding: '2rem', marginBottom: '3rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', flexWrap: 'wrap', border: dirHandle ? '1px solid var(--primary-color)' : '1px solid var(--surface-border)' }}>
         <div>
           <h3 style={{ margin: '0 0 0.8rem 0', fontSize: '1.5rem', color: dirHandle ? 'var(--primary-color)' : '#fff', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <FolderOpen size={24} /> {dirHandle ? 'Synced Local Folder' : 'Local Sync Required'}
+            <FolderOpen size={24} /> {dirHandle ? 'Synced Local Folder' : 'Local Sync Folder'}
           </h3>
           <p style={{ margin: 0, fontSize: '1.1rem', color: 'var(--text-muted)' }}>
             {dirHandle ? (
-              <span style={{ color: '#fff' }}>Saving downloads directly to: <strong>{dirHandle.name}</strong></span>
+              <span style={{ color: '#fff' }}>Saving models directly to: <strong>{dirHandle.name}</strong></span>
             ) : (
-              'Select a folder on your computer to allow direct downloads.'
+              'Select a folder on your computer to enable direct sync.'
             )}
           </p>
         </div>
-        <button 
-          onClick={selectDirectory} 
-          className="search-button" 
-          style={{ 
-            background: dirHandle ? 'transparent' : 'var(--primary-color)', 
-            color: dirHandle ? 'var(--primary-color)' : '#000',
-            border: dirHandle ? '1px solid var(--primary-color)' : 'none',
-            fontSize: '1.1rem',
-            padding: '1rem 2rem',
-            borderRadius: '8px'
-          }}
-        >
-          {dirHandle ? 'Change Folder' : 'Select Local Folder Now'}
+        <button onClick={selectDirectory} className="search-button" style={{ background: dirHandle ? 'transparent' : 'var(--primary-color)', color: dirHandle ? 'var(--primary-color)' : '#000', border: dirHandle ? '1px solid var(--primary-color)' : 'none', fontSize: '1.1rem', padding: '1rem 2rem', borderRadius: '8px' }}>
+          {dirHandle ? 'Change Folder' : 'Select Local Folder'}
         </button>
       </div>
 
       <div style={{ display: 'flex', gap: '1rem', marginBottom: '2rem', borderBottom: '1px solid var(--surface-border)', paddingBottom: '1rem' }}>
-        <button className={`tab-btn ${activeTab === 'search' ? 'active' : ''}`} onClick={() => setActiveTab('search')}>Search</button>
-        <button className={`tab-btn ${activeTab === 'downloads' ? 'active' : ''}`} onClick={() => setActiveTab('downloads')}>My Downloads</button>
-        <button className={`tab-btn ${activeTab === 'favorites' ? 'active' : ''}`} onClick={() => setActiveTab('favorites')}>My Favorites</button>
+        <button className={`tab-btn ${activeTab === 'search' ? 'active' : ''}`} onClick={() => { setActiveTab('search'); setCurrentPage(1); }}>Search</button>
+        <button className={`tab-btn ${activeTab === 'favorites' ? 'active' : ''}`} onClick={() => { setActiveTab('favorites'); setCurrentPage(1); }}>My Favorites</button>
+        <button className={`tab-btn ${activeTab === 'downloads' ? 'active' : ''}`} onClick={() => { setActiveTab('downloads'); setCurrentPage(1); }}>My Downloads</button>
       </div>
 
-      {(activeTab === 'downloads' || activeTab === 'favorites') && isGuest ? (
-        <div style={{ textAlign: 'center', padding: '4rem 1rem', background: 'var(--surface-color)', borderRadius: '12px', border: '1px solid var(--surface-border)', marginBottom: '2rem' }}>
-          <Bookmark size={48} color="var(--primary-color)" style={{ margin: '0 auto 1.5rem auto', opacity: 0.8 }} />
-          <h2 style={{ marginBottom: '1rem', fontSize: '2rem' }}>Unlock {activeTab === 'downloads' ? 'Download History' : 'Favorites'}</h2>
-          <p style={{ color: 'var(--text-muted)', marginBottom: '2rem', fontSize: '1.2rem', maxWidth: '500px', margin: '0 auto 2rem auto' }}>
-            You need an account to view and manage your {activeTab === 'downloads' ? 'download history' : 'favorite models'}.
-          </p>
-          <a href="/api/auth/tone3000" className="search-button" style={{ display: 'inline-block', padding: '1rem 2rem', fontSize: '1.1rem', textDecoration: 'none' }}>
-            Login with Tone3000
-          </a>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem', flexWrap: 'wrap', gap: '1rem' }}>
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+          {['', 'full-rig', 'amp', 'pedal', 'outboard', 'ir'].map(cat => (
+            <button
+              key={cat || 'all'}
+              className={`filter-btn ${activeCategory === cat ? 'active' : ''}`}
+              onClick={() => { setActiveCategory(cat); setCurrentPage(1); }}
+            >
+              {cat === '' ? 'All' : gearLabel(cat)}
+            </button>
+          ))}
         </div>
-      ) : !isGuest && userData.username && userData.tone3000Connected === false ? (
-        <div style={{ textAlign: 'center', padding: '4rem 1rem', background: 'var(--surface-color)', borderRadius: '12px', border: '1px solid rgba(102, 252, 241, 0.4)', marginBottom: '2rem', boxShadow: '0 0 30px rgba(102, 252, 241, 0.1)' }}>
-          <h2 style={{ marginBottom: '1rem', fontSize: '2.5rem', color: 'var(--primary-color)' }}>Connect Tone3000</h2>
-          <p style={{ color: 'var(--text-muted)', marginBottom: '2rem', fontSize: '1.2rem', maxWidth: '600px', margin: '0 auto 2rem auto', lineHeight: 1.6 }}>
-            To comply with Tone3000 API guidelines and enable seamless downloads, you must securely connect your Tone3000 account. This allows you to browse and download models directly to your local folder.
-          </p>
-          <a href="/api/auth/tone3000" className="search-button" style={{ display: 'inline-block', padding: '1rem 2rem', fontSize: '1.2rem', textDecoration: 'none', background: 'var(--primary-color)', color: '#000', fontWeight: 'bold' }}>
-            Link Tone3000 Account Now
-          </a>
+        <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+          <select className="sort-select" value={activeArchitecture} onChange={e => { setActiveArchitecture(e.target.value); setCurrentPage(1); }}>
+            <option value="">All Versions</option>
+            <option value="2">NAM A2 Only</option>
+            <option value="1">NAM A1 (Legacy) Only</option>
+            <option value="custom">Custom</option>
+          </select>
+          {activeTab === 'search' && (
+            <select className="sort-select" value={sortBy} onChange={e => { setSortBy(e.target.value); setCurrentPage(1); }}>
+              <option value="trending">Trending</option>
+              <option value="newest">Newest</option>
+              <option value="oldest">Oldest</option>
+              <option value="downloads">Most Downloaded</option>
+              <option value="best-match">Best Match</option>
+            </select>
+          )}
         </div>
-      ) : (
-        <>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem', flexWrap: 'wrap', gap: '1rem' }}>
-            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-              <button className={`filter-btn ${activeCategory === '' ? 'active' : ''}`} onClick={() => setActiveCategory('')}>All</button>
-              <button className={`filter-btn ${activeCategory === 'full-rig' ? 'active' : ''}`} onClick={() => setActiveCategory('full-rig')}>Full Rig</button>
-              <button className={`filter-btn ${activeCategory === 'amp' ? 'active' : ''}`} onClick={() => setActiveCategory('amp')}>Amp Head</button>
-              <button className={`filter-btn ${activeCategory === 'pedal' ? 'active' : ''}`} onClick={() => setActiveCategory('pedal')}>Pedal</button>
-              <button className={`filter-btn ${activeCategory === 'outboard' ? 'active' : ''}`} onClick={() => setActiveCategory('outboard')}>Outboard</button>
-              <button className={`filter-btn ${activeCategory === 'ir' ? 'active' : ''}`} onClick={() => setActiveCategory('ir')}>Cabinet / IR</button>
-            </div>
-
-            <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
-              <select 
-                className="sort-select" 
-                value={activeArchitecture} 
-                onChange={(e) => setActiveArchitecture(e.target.value)}
-              >
-                <option value="">All Versions</option>
-                <option value="2">NAM A2 Only</option>
-                <option value="1">NAM A1 (Legacy) Only</option>
-                <option value="custom">Custom</option>
-              </select>
-
-              <select 
-                className="sort-select" 
-                value={sortBy} 
-                onChange={(e) => setSortBy(e.target.value)}
-              >
-                <option value="trending">Trending</option>
-                <option value="newest">Newest</option>
-                <option value="oldest">Oldest</option>
-                <option value="downloads">Most Downloaded</option>
-                <option value="best-match">Best Match</option>
-              </select>
-            </div>
-          </div>
+      </div>
 
       {activeTab === 'search' && (
         <form className="search-container" onSubmit={handleSearch}>
-          <input 
-            type="text" 
-            className="search-input" 
-            placeholder="Search packages (e.g., Fender, 6505+, Bogner...)" 
+          <input
+            type="text"
+            className="search-input"
+            placeholder="Search tones (e.g., Fender, 6505+, Bogner...)"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={e => setQuery(e.target.value)}
           />
           <button type="submit" className="search-button" disabled={isSearching}>
             {isSearching ? 'Searching...' : 'Search'}
@@ -559,134 +546,89 @@ export default function Home() {
       )}
 
       <div className="models-list">
-        {results.map(model => {
-          const isDownloaded = userData.downloads?.includes(model.id);
-          const isFavorited = userData.favorites?.includes(model.id);
+        {results.map(tone => {
+          const isDownloaded = downloadHistory.some(t => t.id === tone.id);
+          const isFavorited = favoriteIds.has(tone.id);
+          const image = tone.images && tone.images.length > 0 ? tone.images[0] : null;
+          const fsSupported = typeof window !== 'undefined' && 'showDirectoryPicker' in window;
+          const downloadDisabled = downloadingItems.has(tone.id) || (fsSupported && !dirHandle);
 
           return (
-            <div key={model.id} className="model-card">
+            <div key={tone.id} className="model-card">
               <div className="model-image-container">
-                {model.image ? (
-                  <img src={model.image} alt={model.name} className="model-image" />
-                ) : (
-                  <Folder size={32} color="#555" />
-                )}
+                {image ? <img src={image} alt={tone.title} className="model-image" /> : <Folder size={32} color="#555" />}
               </div>
-              
               <div className="model-info">
                 <div>
                   <div className="model-header">
                     <h3 className="model-title">
-                      <a href={`https://www.tone3000.com/tones/${model.slug}-${model.id}`} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none' }}>
-                        {model.name} <ExternalLink size={14} style={{ opacity: 0.5, marginLeft: '4px' }} />
+                      <a href={toneHref(tone)} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none' }}>
+                        {tone.title} <ExternalLink size={14} style={{ opacity: 0.5, marginLeft: '4px' }} />
                       </a>
                     </h3>
                   </div>
-                  
                   <div className="model-gear">
-                    {model.type}
-                    {model.isA2 && <span className="badge">NAM A2</span>}
-                    {model.hasA1 && <span className="badge">NAM A1</span>}
-                    {model.hasIR && <span className="badge">IR</span>}
-                    {!model.isA2 && !model.hasA1 && !model.hasIR && <span className="badge">NAM</span>}
+                    {gearLabel(tone.gear)}
+                    {(tone.a2_models_count ?? 0) > 0 && <span className="badge">NAM A2</span>}
+                    {(tone.a1_models_count ?? 0) > 0 && <span className="badge">NAM A1</span>}
+                    {(tone.irs_count ?? 0) > 0 && <span className="badge">IR</span>}
                   </div>
-                  
                   <div className="model-stats">
-                    <div className="stat-item">
-                      <DownloadCloud size={14} /> {model.downloads_count}
+                    <div className="stat-item"><DownloadCloud size={14} /> {tone.downloads_count}</div>
+                    <div className={`stat-item stat-action ${isFavorited ? 'active' : ''}`} onClick={() => toggleFavorite(tone)}>
+                      <Bookmark size={14} fill={isFavorited ? 'currentColor' : 'none'} /> {tone.favorites_count}
                     </div>
-                    <div 
-                      className={`stat-item stat-action ${isFavorited ? 'active' : ''}`}
-                      onClick={() => toggleFavorite(model.id)}
-                    >
-                      <Bookmark size={14} fill={isFavorited ? "currentColor" : "none"} /> {model.favorites_count}
-                    </div>
-                    <div className="stat-item">
-                      <Folder size={14} /> {model.models_count}
-                    </div>
+                    <div className="stat-item"><Folder size={14} /> {tone.models_count}</div>
                   </div>
                 </div>
-
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
                   <div className="model-author-row">
-                    {model.avatar_url ? (
-                      <img src={model.avatar_url} alt={model.author} className="author-avatar" />
+                    {tone.user?.avatar_url ? (
+                      <img src={tone.user.avatar_url} alt={tone.user.username} className="author-avatar" />
                     ) : (
                       <div className="author-avatar" />
                     )}
-                    <span>{model.author}</span>
-                    <span>·</span>
-                    <span>{model.created_at}</span>
+                    <span>{tone.user?.username}</span>
                   </div>
-
-                  {isDownloaded ? (
-                    <button 
-                      className="action-btn" 
-                      onClick={() => handleDownload(model)}
-                      disabled={downloadingItems.has(model.id) || (typeof window !== 'undefined' && 'showDirectoryPicker' in window && !dirHandle)}
-                      style={{ color: 'var(--primary-color)', borderColor: 'var(--primary-color)', opacity: (typeof window !== 'undefined' && 'showDirectoryPicker' in window && !dirHandle) ? 0.5 : 1 }}
-                      title={(typeof window !== 'undefined' && 'showDirectoryPicker' in window && !dirHandle) ? 'Select a folder above first' : 'Redownload'}
-                    >
-                      {downloadingItems.has(model.id) ? 'Downloading...' : <><CheckCircle size={16} /> Redownload</>}
-                    </button>
-                  ) : (
-                    <button 
-                      className="action-btn"
-                      onClick={() => handleDownload(model)}
-                      disabled={downloadingItems.has(model.id) || (typeof window !== 'undefined' && 'showDirectoryPicker' in window && !dirHandle)}
-                      style={{ opacity: (typeof window !== 'undefined' && 'showDirectoryPicker' in window && !dirHandle) ? 0.5 : 1 }}
-                      title={(typeof window !== 'undefined' && 'showDirectoryPicker' in window && !dirHandle) ? 'Select a folder above first' : ''}
-                    >
-                      {downloadingItems.has(model.id) ? 'Downloading...' : <><DownloadCloud size={16} /> Download</>}
-                    </button>
-                  )}
+                  <button
+                    className="action-btn"
+                    onClick={() => handleDownload(tone)}
+                    disabled={downloadDisabled}
+                    style={{ color: isDownloaded ? 'var(--primary-color)' : undefined, borderColor: isDownloaded ? 'var(--primary-color)' : undefined, opacity: downloadDisabled && !downloadingItems.has(tone.id) ? 0.5 : 1 }}
+                    title={fsSupported && !dirHandle ? 'Select a folder above first' : isDownloaded ? 'Re-sync' : 'Sync to local folder'}
+                  >
+                    {downloadingItems.has(tone.id)
+                      ? 'Syncing...'
+                      : isDownloaded
+                        ? <><CheckCircle size={16} /> Re-sync</>
+                        : <><DownloadCloud size={16} /> Sync</>}
+                  </button>
                 </div>
               </div>
             </div>
           );
         })}
       </div>
-      
-      {totalPages > 1 && (
+
+      {totalPages > 1 && activeTab !== 'downloads' && (
         <div className="pagination-controls" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '1rem', marginTop: '3rem' }}>
-          <button 
-            className="action-btn" 
-            disabled={currentPage === 1 || isSearching}
-            onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
-          >
-            Previous
-          </button>
-          <span style={{ color: 'var(--text-primary)', fontSize: '0.9rem' }}>
-            Page {currentPage} of {totalPages}
-          </span>
-          <button 
-            className="action-btn" 
-            disabled={currentPage >= totalPages || isSearching}
-            onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
-          >
-            Next
-          </button>
+          <button className="action-btn" disabled={currentPage === 1 || isSearching} onClick={() => setCurrentPage(p => Math.max(1, p - 1))}>Previous</button>
+          <span style={{ fontSize: '0.9rem' }}>Page {currentPage} of {totalPages}</span>
+          <button className="action-btn" disabled={currentPage >= totalPages || isSearching} onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}>Next</button>
         </div>
       )}
 
       {results.length === 0 && !isSearching && (
         <div style={{ textAlign: 'center', marginTop: '3rem', color: 'var(--text-muted)' }}>
-          {query ? `No models found for "${query}"` : "No models found."}
+          {activeTab === 'favorites' ? 'No favorites yet — bookmark a tone to see it here.'
+            : activeTab === 'downloads' ? 'No synced tones yet.'
+            : query ? `No tones found for "${query}"` : 'No tones found.'}
         </div>
       )}
-      </>
-      )}
 
-      {/* Toasts Container */}
-      <div style={{
-        position: 'fixed', bottom: '20px', right: '20px', display: 'flex', flexDirection: 'column', gap: '10px', zIndex: 9999
-      }}>
+      <div style={{ position: 'fixed', bottom: '20px', right: '20px', display: 'flex', flexDirection: 'column', gap: '10px', zIndex: 9999 }}>
         {toasts.map(toast => (
-          <div key={toast.id} style={{
-            background: toast.type === 'success' ? '#10b981' : toast.type === 'error' ? '#ef4444' : '#3b82f6',
-            color: 'white', padding: '12px 20px', borderRadius: '8px', boxShadow: '0 4px 6px rgba(0,0,0,0.2)',
-            transition: 'opacity 0.3s ease-out'
-          }}>
+          <div key={toast.id} style={{ background: toast.type === 'success' ? '#10b981' : toast.type === 'error' ? '#ef4444' : '#3b82f6', color: 'white', padding: '12px 20px', borderRadius: '8px', boxShadow: '0 4px 6px rgba(0,0,0,0.2)' }}>
             {toast.message}
           </div>
         ))}
