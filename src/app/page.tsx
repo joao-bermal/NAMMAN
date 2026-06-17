@@ -423,9 +423,9 @@ export default function Home() {
           // Swallowing individual model error so the rest of the pack can sync
         }
 
-        // Delay 800ms between each file to prevent triggering Tone3000 rate limit
+        // Delay 2000ms between each file to be absolutely safe with Tone3000 rate limit
         if (i < models.length - 1) {
-          await new Promise(r => setTimeout(r, 800));
+          await new Promise(r => setTimeout(r, 2000));
         }
       }
 
@@ -434,9 +434,13 @@ export default function Home() {
         await toggleFavorite(tone);
       }
       addToast(`Synced "${tone.title}" (${models.length} model${models.length > 1 ? 's' : ''}).`, 'success');
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      addToast(`Error syncing "${tone.title}".`, 'error');
+      if (err.message?.includes('429')) {
+        addToast(`Tone3000 Rate Limit exceeded. Please wait a few minutes.`, 'error');
+      } else {
+        addToast(`Error syncing "${tone.title}".`, 'error');
+      }
     } finally {
       setDownloadingItems(prev => {
         const n = new Set(prev);
