@@ -7,7 +7,7 @@
 /* eslint-disable react-hooks/set-state-in-effect */
 
 import { useState, useEffect, useCallback } from 'react';
-import { DownloadCloud, CheckCircle, Bookmark, Folder, FolderOpen, ExternalLink, LogOut } from 'lucide-react';
+import { DownloadCloud, CheckCircle, Bookmark, Folder, FolderOpen, ExternalLink, LogOut, Layers, Server, Box, Sliders, Radio, Activity, Search, Grid } from 'lucide-react';
 import { get, set } from 'idb-keyval';
 
 import { PUBLISHABLE_KEY, getRedirectUri } from '@/lib/tone3000/config';
@@ -40,6 +40,20 @@ const toneHref = (tone: Tone): string => {
     return tone.url;
   }
 };
+
+function timeAgo(dateString: string) {
+  const diff = Date.now() - new Date(dateString).getTime();
+  const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+  if (days > 365) return `${Math.floor(days / 365)} years ago`;
+  if (days > 30) return `${Math.floor(days / 30)} months ago`;
+  if (days >= 14) return `${Math.floor(days / 7)} weeks ago`;
+  if (days >= 7) return `1 week ago`;
+  if (days > 0) return `${days} days ago`;
+  const hours = Math.floor(diff / (1000 * 60 * 60));
+  if (hours > 0) return `${hours} hours ago`;
+  const minutes = Math.floor(diff / (1000 * 60));
+  return `${Math.max(1, minutes)} minutes ago`;
+}
 
 const gearLabel = (gear: string): string =>
   gear === 'full-rig' ? 'Full Rig'
@@ -224,32 +238,20 @@ export default function Home() {
     try {
       if (tab === 'favorites') {
         const res = await client.listFavoritedTones({ page, pageSize: PAGE_SIZE });
-        let data = res.data;
-        if (architecture === '2') {
-          data = data.filter(t => (t.a2_models_count ?? 0) > 0);
-        } else if (architecture === '1') {
-          data = data.filter(t => (t.a1_models_count ?? 0) > 0);
-        }
-        setResults(data);
+        setResults(res.data);
         setTotalPages(res.total_pages || 1);
       } else {
+        const effectiveArchitecture = category === 'ir' ? undefined : architecture;
         const res = await client.searchTones({
           query: searchTerm || undefined,
           page,
           pageSize: PAGE_SIZE,
           sort: sortMap[sort] ?? TonesSort.Trending,
           gears: category ? [category as Gear] : undefined,
-          architecture: (architecture || undefined) as ArchitectureVersion | undefined,
+          architecture: (effectiveArchitecture || undefined) as ArchitectureVersion | undefined,
         });
         
-        let data = res.data;
-        if (architecture === '2') {
-          data = data.filter(t => (t.a2_models_count ?? 0) > 0);
-        } else if (architecture === '1') {
-          data = data.filter(t => (t.a1_models_count ?? 0) > 0);
-        }
-        
-        setResults(data);
+        setResults(res.data);
         setTotalPages(res.total_pages || 1);
       }
     } catch (err) {
@@ -426,29 +428,27 @@ export default function Home() {
 
   if (!connected) {
     return (
-      <main>
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '70vh', textAlign: 'center', gap: '1.5rem' }}>
-          <div>
-            <h1 style={{ fontSize: '2.8rem', margin: 0 }}>ToneManager</h1>
-            <p style={{ color: 'var(--text-muted)', fontSize: '1.2rem', marginTop: '0.5rem', maxWidth: '560px' }}>
-              Browse, favorite and <strong>sync NAM models</strong> from{' '}
-              <a href="https://www.tone3000.com" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--primary-color)', textDecoration: 'none' }}>TONE3000</a>{' '}
-              straight to a local folder on your machine.
-            </p>
-          </div>
+      <main style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '80vh' }}>
+        <div style={{ textAlign: 'center', maxWidth: '450px' }}>
+          <h1 style={{ fontSize: '4.5rem', margin: '0 0 0.5rem 0' }} className="t3k-logo">NAMMAN</h1>
+          <p style={{ color: 'var(--text-muted)', fontSize: '1.2rem', lineHeight: 1.6, marginBottom: '3rem' }}>
+            Manage your NAM profiles that are synced directly from <a href="https://tone3000.com" target="_blank" rel="noopener noreferrer" className="t3k-logo" style={{ textDecoration: 'none', fontSize: '1.3rem' }}>TONE3000</a>.
+          </p>
           {authError && (
-            <div style={{ background: 'rgba(255,0,0,0.1)', border: '1px solid rgba(255,0,0,0.3)', color: '#ff6b6b', padding: '1rem 1.5rem', borderRadius: '8px', maxWidth: '560px' }}>
+            <div style={{ background: 'rgba(255,0,0,0.1)', border: '1px solid rgba(255,0,0,0.3)', color: '#ff6b6b', padding: '1rem', borderRadius: '8px', marginBottom: '1.5rem' }}>
               {authError}
             </div>
           )}
-          <button
-            onClick={connect}
-            disabled={!PUBLISHABLE_KEY}
-            className="search-button"
-            style={{ background: 'var(--primary-color)', color: '#000', border: 'none', fontWeight: 'bold', fontSize: '1.1rem', padding: '1rem 2.5rem', borderRadius: '8px', opacity: PUBLISHABLE_KEY ? 1 : 0.5 }}
-          >
-            Connect with TONE3000
-          </button>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+            <button 
+              className="action-btn" 
+              onClick={connect} 
+              disabled={!PUBLISHABLE_KEY}
+              style={{ padding: '1rem 2rem', fontSize: '1.1rem', fontWeight: 600, background: '#facc15', color: '#000', border: 'none', borderRadius: '50px', opacity: PUBLISHABLE_KEY ? 1 : 0.5 }}
+            >
+              Connect with Tone3000
+            </button>
+          </div>
         </div>
       </main>
     );
@@ -458,10 +458,10 @@ export default function Home() {
     <main>
       <div className="header" style={{ display: 'flex', flexWrap: 'wrap', gap: '1rem', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem', paddingBottom: '1.5rem', borderBottom: '1px solid var(--surface-border)' }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-          <h1 style={{ fontSize: '2.5rem', margin: 0 }}>ToneManager</h1>
+          <h1 style={{ fontSize: '3rem', margin: 0 }} className="t3k-logo">NAMMAN</h1>
           <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: '1.1rem' }}>
-            Syncing NAM profiles from{' '}
-            <a href="https://www.tone3000.com" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--primary-color)', textDecoration: 'none', fontWeight: 'bold' }}>tone3000</a>.
+            Manage your NAM profiles that are synced directly from{' '}
+            <a href="https://www.tone3000.com" target="_blank" rel="noopener noreferrer" className="t3k-logo" style={{ fontSize: '1.2rem', textDecoration: 'none' }}>TONE3000</a>.
           </p>
         </div>
         <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', flexWrap: 'wrap', background: 'var(--surface-color)', padding: '0.8rem 1.5rem', borderRadius: '50px', border: '1px solid var(--surface-border)' }}>
@@ -499,51 +499,69 @@ export default function Home() {
         <button className={`tab-btn ${activeTab === 'downloads' ? 'active' : ''}`} onClick={() => { setActiveTab('downloads'); setCurrentPage(1); }}>My Downloads</button>
       </div>
 
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem', flexWrap: 'wrap', gap: '1rem' }}>
-        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-          {['', 'full-rig', 'amp', 'pedal', 'outboard', 'ir'].map(cat => (
+      <div style={{ marginBottom: '3rem' }}>
+        <h2 style={{ fontSize: '1.8rem', marginBottom: '1.5rem', color: '#fff' }}>Explore NAM Profiles & IR's</h2>
+        
+        <div style={{ display: 'flex', gap: '0.8rem', flexWrap: 'wrap', marginBottom: '2rem' }}>
+          {[
+            { id: '', label: 'All', icon: <Grid size={16} /> },
+            { id: 'full-rig', label: 'Full Rig', icon: <Server size={16} /> },
+            { id: 'amp', label: 'Amp Head', icon: <Box size={16} /> },
+            { id: 'pedal', label: 'Pedal', icon: <Sliders size={16} /> },
+            { id: 'outboard', label: 'Outboard', icon: <Radio size={16} /> },
+            { id: 'ir', label: 'IR', icon: <Activity size={16} /> }
+          ].map(cat => (
             <button
-              key={cat || 'all'}
-              className={`filter-btn ${activeCategory === cat ? 'active' : ''}`}
-              onClick={() => { setActiveCategory(cat); setCurrentPage(1); }}
+              key={cat.id || 'all'}
+              className={`filter-btn ${activeCategory === cat.id ? 'active' : ''}`}
+              style={{ borderRadius: '50px', padding: '0.6rem 1.2rem', display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem' }}
+              onClick={() => { setActiveCategory(cat.id); setCurrentPage(1); }}
             >
-              {cat === '' ? 'All' : gearLabel(cat)}
+              {cat.icon} {cat.label}
             </button>
           ))}
         </div>
-        <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
-          <select className="sort-select" value={activeArchitecture} onChange={e => { setActiveArchitecture(e.target.value); setCurrentPage(1); }}>
-            <option value="">All Versions</option>
-            <option value="2">NAM A2 Only</option>
-            <option value="1">NAM A1 (Legacy) Only</option>
-            <option value="custom">Custom</option>
-          </select>
-          {activeTab === 'search' && (
-            <select className="sort-select" value={sortBy} onChange={e => { setSortBy(e.target.value); setCurrentPage(1); }}>
-              <option value="trending">Trending</option>
-              <option value="newest">Newest</option>
-              <option value="oldest">Oldest</option>
-              <option value="downloads">Most Downloaded</option>
-              <option value="best-match">Best Match</option>
+
+        {activeTab === 'search' && (
+          <form onSubmit={handleSearch} style={{ marginBottom: '2rem', display: 'flex', gap: '1rem' }}>
+            <div style={{ flex: 1, position: 'relative' }}>
+              <Search size={20} color="var(--text-muted)" style={{ position: 'absolute', left: '1rem', top: '50%', transform: 'translateY(-50%)' }} />
+              <input
+                type="text"
+                className="search-input"
+                placeholder="Search packages (e.g., Fender, 6505+, Bogner...)"
+                value={query}
+                onChange={e => setQuery(e.target.value)}
+                style={{ width: '100%', padding: '1rem 1rem 1rem 3rem', borderRadius: '50px', fontSize: '1.1rem', background: 'var(--bg-color)' }}
+              />
+            </div>
+            <button type="submit" className="search-button" disabled={isSearching} style={{ borderRadius: '50px', padding: '0 2rem' }}>
+              {isSearching ? 'Searching...' : 'Search'}
+            </button>
+          </form>
+        )}
+
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', borderTop: '1px solid var(--surface-border)', paddingTop: '1.5rem' }}>
+          <h3 style={{ fontSize: '1.3rem', margin: 0, color: '#fff' }}>Refine Your Search</h3>
+          <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+            <select className="sort-select" value={activeArchitecture} onChange={e => { setActiveArchitecture(e.target.value); setCurrentPage(1); }}>
+              <option value="">All Versions</option>
+              <option value="2">NAM A2 Only</option>
+              <option value="1">NAM A1 (Legacy) Only</option>
+              <option value="custom">Custom</option>
             </select>
-          )}
+            {activeTab === 'search' && (
+              <select className="sort-select" value={sortBy} onChange={e => { setSortBy(e.target.value); setCurrentPage(1); }}>
+                <option value="trending">Trending</option>
+                <option value="newest">Newest</option>
+                <option value="oldest">Oldest</option>
+                <option value="downloads">Most Downloaded</option>
+                <option value="best-match">Best Match</option>
+              </select>
+            )}
+          </div>
         </div>
       </div>
-
-      {activeTab === 'search' && (
-        <form className="search-container" onSubmit={handleSearch}>
-          <input
-            type="text"
-            className="search-input"
-            placeholder="Search tones (e.g., Fender, 6505+, Bogner...)"
-            value={query}
-            onChange={e => setQuery(e.target.value)}
-          />
-          <button type="submit" className="search-button" disabled={isSearching}>
-            {isSearching ? 'Searching...' : 'Search'}
-          </button>
-        </form>
-      )}
 
       <div className="models-list">
         {results.map(tone => {
@@ -554,56 +572,72 @@ export default function Home() {
           const downloadDisabled = downloadingItems.has(tone.id) || (fsSupported && !dirHandle);
 
           return (
-            <div key={tone.id} className="model-card">
-              <div className="model-image-container">
+            <div key={tone.id} className="model-card" style={{ borderRadius: '16px', padding: '1.2rem 1.5rem', alignItems: 'center' }}>
+              <div className="model-image-container" style={{ borderRadius: '12px', width: '130px', height: '130px', marginRight: '2rem' }}>
                 {image ? <img src={image} alt={tone.title} className="model-image" /> : <Folder size={32} color="#555" />}
               </div>
-              <div className="model-info">
-                <div>
-                  <div className="model-header">
-                    <h3 className="model-title">
-                      <a href={toneHref(tone)} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none' }}>
-                        {tone.title} <ExternalLink size={14} style={{ opacity: 0.5, marginLeft: '4px' }} />
-                      </a>
-                    </h3>
-                  </div>
-                  <div className="model-gear">
+              <div className="model-info" style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '0.8rem', padding: '0.5rem 0' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                  <h3 className="model-title" style={{ fontSize: '1.3rem', margin: 0, lineHeight: 1.2 }}>
+                    <a href={toneHref(tone)} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none' }}>
+                      {tone.title} <ExternalLink size={14} style={{ opacity: 0.5, marginLeft: '4px' }} />
+                    </a>
+                  </h3>
+                  
+                  <div className="model-gear" style={{ margin: 0, fontSize: '0.9rem' }}>
                     {gearLabel(tone.gear)}
                     {(tone.a2_models_count ?? 0) > 0 && <span className="badge">NAM A2</span>}
                     {(tone.a1_models_count ?? 0) > 0 && <span className="badge">NAM A1</span>}
                     {(tone.irs_count ?? 0) > 0 && <span className="badge">IR</span>}
                   </div>
-                  <div className="model-stats">
-                    <div className="stat-item"><DownloadCloud size={14} /> {tone.downloads_count}</div>
-                    <div className={`stat-item stat-action ${isFavorited ? 'active' : ''}`} onClick={() => toggleFavorite(tone)}>
-                      <Bookmark size={14} fill={isFavorited ? 'currentColor' : 'none'} /> {tone.favorites_count}
-                    </div>
-                    <div className="stat-item"><Folder size={14} /> {tone.models_count}</div>
-                  </div>
                 </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
-                  <div className="model-author-row">
-                    {tone.user?.avatar_url ? (
-                      <img src={tone.user.avatar_url} alt={tone.user.username} className="author-avatar" />
-                    ) : (
-                      <div className="author-avatar" />
-                    )}
-                    <span>{tone.user?.username}</span>
+
+                <div className="model-stats" style={{ margin: 0 }}>
+                  <div className="stat-item"><DownloadCloud size={16} /> {tone.downloads_count}</div>
+                  <div className={`stat-item stat-action ${isFavorited ? 'active' : ''}`} onClick={() => toggleFavorite(tone)}>
+                    <Bookmark size={16} fill={isFavorited ? 'currentColor' : 'none'} /> {tone.favorites_count}
                   </div>
-                  <button
-                    className="action-btn"
-                    onClick={() => handleDownload(tone)}
-                    disabled={downloadDisabled}
-                    style={{ color: isDownloaded ? 'var(--primary-color)' : undefined, borderColor: isDownloaded ? 'var(--primary-color)' : undefined, opacity: downloadDisabled && !downloadingItems.has(tone.id) ? 0.5 : 1 }}
-                    title={fsSupported && !dirHandle ? 'Select a folder above first' : isDownloaded ? 'Re-sync' : 'Sync to local folder'}
-                  >
-                    {downloadingItems.has(tone.id)
-                      ? 'Syncing...'
-                      : isDownloaded
-                        ? <><CheckCircle size={16} /> Re-sync</>
-                        : <><DownloadCloud size={16} /> Sync</>}
-                  </button>
+                  <div className="stat-item"><Folder size={16} /> {tone.models_count}</div>
                 </div>
+
+                <div className="model-author-row" style={{ marginTop: 0 }}>
+                  {tone.user?.avatar_url ? (
+                    <img src={tone.user.avatar_url} alt={tone.user.username} className="author-avatar" />
+                  ) : (
+                    <div className="author-avatar" />
+                  )}
+                  <span style={{ fontWeight: 500, color: 'var(--text-primary)' }}>{tone.user?.username}</span>
+                  {tone.created_at && (
+                    <>
+                      <span style={{ color: 'var(--text-muted)' }}>•</span>
+                      <span style={{ color: 'var(--text-muted)' }}>{timeAgo(tone.created_at)}</span>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              <div style={{ paddingLeft: '2rem' }}>
+                <button
+                  className="action-btn"
+                  onClick={() => handleDownload(tone)}
+                  disabled={downloadDisabled}
+                  style={{ 
+                    color: isDownloaded ? '#10b981' : undefined, 
+                    borderColor: isDownloaded ? '#10b981' : undefined, 
+                    backgroundColor: isDownloaded ? 'rgba(16, 185, 129, 0.1)' : undefined,
+                    opacity: downloadDisabled && !downloadingItems.has(tone.id) ? 0.5 : 1,
+                    padding: '0.8rem 1.5rem',
+                    borderRadius: '50px',
+                    fontWeight: 600
+                  }}
+                  title={fsSupported && !dirHandle ? 'Select a folder above first' : isDownloaded ? 'Re-sync' : 'Sync to local folder'}
+                >
+                  {downloadingItems.has(tone.id)
+                    ? 'Syncing...'
+                    : isDownloaded
+                      ? <><CheckCircle size={18} /> Re-sync</>
+                      : <><DownloadCloud size={18} /> Sync</>}
+                </button>
               </div>
             </div>
           );

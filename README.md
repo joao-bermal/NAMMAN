@@ -1,12 +1,12 @@
-# ToneManager
+# NAMMAN
 
-ToneManager is a client-side web app for browsing, favoriting, and **syncing Neural Amp Modeler (NAM) captures** from [TONE3000](https://www.tone3000.com) directly to a local folder on your machine.
+NAMMAN is a Next.js application that enables guitarists and audio engineers to browse, preview, and sync Neural Amp Modeler (NAM) profiles directly to their local filesystem. It uses the new TONE3000 PKCE OAuth flow for a secure, database-free architecture.
 
 It is a thin, browser-only client over the [TONE3000 API](https://www.tone3000.com/api): there is no backend, no database, and no separate account — you connect your TONE3000 account via OAuth and everything (search, favorites, tone/model data, downloads) is served by the TONE3000 API.
 
 ## ✨ Key Features
 
-- **Direct Local Sync (File System Access API)**: ToneManager requests permission to a local folder and writes `.nam` / `.wav` model files straight to disk, organized into `FullRig`, `Amps`, `Pedals`, `Cabinets_IRs`, and `Outboard` subfolders.
+- **Direct Local Sync (File System Access API)**: NAMMAN requests permission to a local folder and writes `.nam` / `.wav` model files straight to disk, organized into `FullRig`, `Amps`, `Pedals`, `Cabinets_IRs`, and `Outboard` subfolders.
 - **Architecture Filtering**: Filter and sync by NAM architecture — A1 (legacy), A2, or custom — so you only pull models your plugin supports.
 - **Deduplication**: Identically-named models across architectures within a pack are de-duped, keeping the highest architecture.
 - **Favorites synced to TONE3000**: Bookmarking uses the TONE3000 favorite endpoints, so favorites follow your account everywhere.
@@ -47,7 +47,7 @@ Create a `.env` (see `example.env`):
 NEXT_PUBLIC_TONE3000_CLIENT_ID=t3k_pub_your_key_here
 ```
 
-Register `http://localhost:3000` as an allowed redirect URI in TONE3000 Settings → API Keys (localhost is auto-allowed during development).
+Open `http://localhost:3000` in a Chrome/Edge browser to use NAMMAN. TONE3000 Settings → API Keys (localhost is auto-allowed during development).
 
 ```bash
 npm run dev

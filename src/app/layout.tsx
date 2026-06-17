@@ -2,8 +2,8 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Tone Manager - NAM',
-  description: 'Download and organize Tone3000 models',
+  title: "NAMMAN",
+  description: "Browse, sync and manage Neural Amp Modeler (NAM) profiles seamlessly.",
 };
 
 export default function RootLayout({
