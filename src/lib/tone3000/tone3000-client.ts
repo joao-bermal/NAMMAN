@@ -588,19 +588,11 @@ export class T3KClient {
   async fetch(path: string, init?: RequestInit): Promise<Response> {
     const resolve = (p: string) => (/^https?:\/\//.test(p) ? p : `${T3K_API}${p}`);
     
-    let res!: Response;
+    let res: Response | undefined;
     let retries = 5;
     let delay = 2000;
 
     while (retries >= 0) {
-      const token = await this.getAccessToken();
-      res = await globalThis.fetch(resolve(path), {
-        ...init,
-        headers: { ...init?.headers, Authorization: `Bearer ${token}` },
-      });
-
-      // Retry once on 401 — handles expiry race conditions between refresh check and request
-      if (res.status === 401) {
         const stored = this.getTokens();
         if (stored) {
           this.setTokens({ ...stored, expires_at: 0 }); // force a refresh on next call
