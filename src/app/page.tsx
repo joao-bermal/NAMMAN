@@ -56,17 +56,21 @@ function timeAgo(dateString: string) {
 }
 
 const gearLabel = (gear: string): string =>
-  gear === 'full-rig' ? 'Full Rig'
-    : gear === 'amp' ? 'Amp Head'
+  gear === 'full-rig' || gear === 'amp-cab' ? 'Amp + Cab'
+    : gear === 'amp' || gear === 'amp-head' ? 'Amp Head'
     : gear === 'pedal' ? 'Pedal'
-    : gear === 'ir' ? 'Cabinet / IR'
+    : gear === 'ir' || gear === 'cabinet' ? 'Cabinet / IR'
+    : gear === 'spaces' ? 'Spaces'
+    : gear === 'experimental' ? 'Experimental'
     : 'Outboard';
 
 const gearFolder = (gear: string): string =>
-  gear === 'full-rig' ? 'FullRig'
-    : gear === 'amp' ? 'Amps'
+  gear === 'full-rig' || gear === 'amp-cab' ? 'FullRig'
+    : gear === 'amp' || gear === 'amp-head' ? 'Amps'
     : gear === 'pedal' ? 'Pedals'
-    : gear === 'ir' ? 'Cabinets_IRs'
+    : gear === 'ir' || gear === 'cabinet' ? 'Cabinets_IRs'
+    : gear === 'spaces' ? 'Spaces'
+    : gear === 'experimental' ? 'Experimental'
     : 'Outboard';
 
 const sortMap: Record<string, TonesSort> = {
@@ -546,13 +550,15 @@ export default function Home() {
         
         <div style={{ display: 'flex', gap: '0.8rem', flexWrap: 'wrap', marginBottom: '2rem' }}>
           {[
-            { id: '', label: 'All', icon: <Grid size={16} /> },
-            { id: 'full-rig', label: 'Full Rig', icon: <Server size={16} /> },
-            { id: 'amp', label: 'Amp Head', icon: <Box size={16} /> },
-            { id: 'pedal', label: 'Pedal', icon: <Sliders size={16} /> },
-            { id: 'outboard', label: 'Outboard', icon: <Radio size={16} /> },
-            { id: 'ir', label: 'IR', icon: <Activity size={16} /> }
-          ].map(cat => (
+              { id: '', label: 'All', icon: <Grid size={16} /> },
+              { id: 'amp-cab', label: 'Amp + Cab', icon: <Server size={16} /> },
+              { id: 'amp-head', label: 'Amp Head', icon: <Box size={16} /> },
+              { id: 'cabinet', label: 'Cabinet', icon: <Activity size={16} /> },
+              { id: 'pedal', label: 'Pedal', icon: <Sliders size={16} /> },
+              { id: 'outboard', label: 'Outboard', icon: <Radio size={16} /> },
+              { id: 'spaces', label: 'Spaces', icon: <Box size={16} /> },
+              { id: 'experimental', label: 'Experimental', icon: <Activity size={16} /> }
+            ].map(cat => (
             <button
               key={cat.id || 'all'}
               className={`filter-btn ${activeCategory === cat.id ? 'active' : ''}`}

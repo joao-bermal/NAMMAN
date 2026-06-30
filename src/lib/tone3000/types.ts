@@ -4,10 +4,15 @@ export type Demo = 'select' | 'load-tone' | 'load-model' | 'full-api' | 'lan-flo
 
 export enum Gear {
   Amp = 'amp',
+  AmpHead = 'amp-head',
   FullRig = 'full-rig',
+  AmpCab = 'amp-cab',
   Pedal = 'pedal',
   Outboard = 'outboard',
   Ir = 'ir',
+  Cabinet = 'cabinet',
+  Spaces = 'spaces',
+  Experimental = 'experimental',
 }
 
 export enum Platform {
