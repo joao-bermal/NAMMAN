@@ -55,9 +55,20 @@ function timeAgo(dateString: string) {
   return `${Math.max(1, minutes)} minutes ago`;
 }
 
-const gearLabel = (gear: string): string => {
-  if (!gear) return 'Unknown';
-  const g = gear.toLowerCase();
+const gearLabel = (tone: Tone): string => {
+  let g = tone.gear?.toLowerCase() || 'unknown';
+  
+  // If it's outboard, check tags for a more specific category
+  if (g === 'outboard' && tone.tags) {
+    const tagNames = tone.tags.map(t => t.name.toLowerCase());
+    if (tagNames.some(t => t.includes('amp-cab') || t.includes('full-rig'))) g = 'amp-cab';
+    else if (tagNames.some(t => t.includes('amp'))) g = 'amp-head';
+    else if (tagNames.some(t => t.includes('cab') || t.includes('ir'))) g = 'cabinet';
+    else if (tagNames.some(t => t.includes('pedal'))) g = 'pedal';
+    else if (tagNames.some(t => t.includes('space'))) g = 'spaces';
+    else if (tagNames.some(t => t.includes('experimental'))) g = 'experimental';
+  }
+
   if (g === 'full-rig' || g === 'amp-cab' || g === 'amp_cab' || g === 'amp+cab') return 'Amp + Cab';
   if (g === 'amp' || g === 'amp-head' || g === 'amp_head') return 'Amp Head';
   if (g === 'pedal') return 'Pedal';
@@ -65,14 +76,24 @@ const gearLabel = (gear: string): string => {
   if (g === 'spaces' || g === 'space') return 'Spaces';
   if (g === 'experimental') return 'Experimental';
   if (g === 'outboard') return 'Outboard';
+  if (g === 'unknown') return 'Unknown';
   
-  // Dynamic fallback: title case the unknown string
   return g.split(/[-_]/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 };
 
-const gearFolder = (gear: string): string => {
-  if (!gear) return 'Unknown';
-  const g = gear.toLowerCase();
+const gearFolder = (tone: Tone): string => {
+  let g = tone.gear?.toLowerCase() || 'unknown';
+  
+  if (g === 'outboard' && tone.tags) {
+    const tagNames = tone.tags.map(t => t.name.toLowerCase());
+    if (tagNames.some(t => t.includes('amp-cab') || t.includes('full-rig'))) g = 'amp-cab';
+    else if (tagNames.some(t => t.includes('amp'))) g = 'amp-head';
+    else if (tagNames.some(t => t.includes('cab') || t.includes('ir'))) g = 'cabinet';
+    else if (tagNames.some(t => t.includes('pedal'))) g = 'pedal';
+    else if (tagNames.some(t => t.includes('space'))) g = 'spaces';
+    else if (tagNames.some(t => t.includes('experimental'))) g = 'experimental';
+  }
+
   if (g === 'full-rig' || g === 'amp-cab' || g === 'amp_cab' || g === 'amp+cab') return 'Amp_and_Cab';
   if (g === 'amp' || g === 'amp-head' || g === 'amp_head') return 'Amps';
   if (g === 'pedal') return 'Pedals';
@@ -80,8 +101,8 @@ const gearFolder = (gear: string): string => {
   if (g === 'spaces' || g === 'space') return 'Spaces';
   if (g === 'experimental') return 'Experimental';
   if (g === 'outboard') return 'Outboard';
+  if (g === 'unknown') return 'Unknown';
   
-  // Dynamic fallback
   return g.split(/[-_]/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join('_');
 };
 
@@ -394,7 +415,7 @@ export default function Home() {
       const safePack = (tone.title || 'Unnamed_Pack').replace(/[^a-z0-9 _-]/gi, '_').trim();
       let packHandle: FileSystemDirectoryHandle | null = null;
       if (dirHandle) {
-        const categoryHandle = await dirHandle.getDirectoryHandle(gearFolder(tone.gear), { create: true });
+        const categoryHandle = await dirHandle.getDirectoryHandle(gearFolder(tone), { create: true });
         packHandle = await categoryHandle.getDirectoryHandle(safePack, { create: true });
       }
 
@@ -645,7 +666,7 @@ export default function Home() {
                   </h3>
                   
                   <div className="model-gear" style={{ margin: 0, fontSize: '0.9rem' }}>
-                    {gearLabel(tone.gear)}
+                    {gearLabel(tone)}
                     {(tone.a2_models_count ?? 0) > 0 && <span className="badge">NAM A2</span>}
                     {(tone.a1_models_count ?? 0) > 0 && <span className="badge">NAM A1</span>}
                     {(tone.irs_count ?? 0) > 0 && <span className="badge">IR</span>}
