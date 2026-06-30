@@ -55,23 +55,35 @@ function timeAgo(dateString: string) {
   return `${Math.max(1, minutes)} minutes ago`;
 }
 
-const gearLabel = (gear: string): string =>
-  gear === 'full-rig' || gear === 'amp-cab' ? 'Amp + Cab'
-    : gear === 'amp' || gear === 'amp-head' ? 'Amp Head'
-    : gear === 'pedal' ? 'Pedal'
-    : gear === 'ir' || gear === 'cabinet' ? 'Cabinet / IR'
-    : gear === 'spaces' ? 'Spaces'
-    : gear === 'experimental' ? 'Experimental'
-    : 'Outboard';
+const gearLabel = (gear: string): string => {
+  if (!gear) return 'Unknown';
+  const g = gear.toLowerCase();
+  if (g === 'full-rig' || g === 'amp-cab' || g === 'amp_cab' || g === 'amp+cab') return 'Amp + Cab';
+  if (g === 'amp' || g === 'amp-head' || g === 'amp_head') return 'Amp Head';
+  if (g === 'pedal') return 'Pedal';
+  if (g === 'ir' || g === 'cabinet' || g === 'cab') return 'Cabinet / IR';
+  if (g === 'spaces' || g === 'space') return 'Spaces';
+  if (g === 'experimental') return 'Experimental';
+  if (g === 'outboard') return 'Outboard';
+  
+  // Dynamic fallback: title case the unknown string
+  return g.split(/[-_]/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+};
 
-const gearFolder = (gear: string): string =>
-  gear === 'full-rig' || gear === 'amp-cab' ? 'FullRig'
-    : gear === 'amp' || gear === 'amp-head' ? 'Amps'
-    : gear === 'pedal' ? 'Pedals'
-    : gear === 'ir' || gear === 'cabinet' ? 'Cabinets_IRs'
-    : gear === 'spaces' ? 'Spaces'
-    : gear === 'experimental' ? 'Experimental'
-    : 'Outboard';
+const gearFolder = (gear: string): string => {
+  if (!gear) return 'Unknown';
+  const g = gear.toLowerCase();
+  if (g === 'full-rig' || g === 'amp-cab' || g === 'amp_cab' || g === 'amp+cab') return 'Amp_and_Cab';
+  if (g === 'amp' || g === 'amp-head' || g === 'amp_head') return 'Amps';
+  if (g === 'pedal') return 'Pedals';
+  if (g === 'ir' || g === 'cabinet' || g === 'cab') return 'Cabinets_IRs';
+  if (g === 'spaces' || g === 'space') return 'Spaces';
+  if (g === 'experimental') return 'Experimental';
+  if (g === 'outboard') return 'Outboard';
+  
+  // Dynamic fallback
+  return g.split(/[-_]/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join('_');
+};
 
 const sortMap: Record<string, TonesSort> = {
   trending: TonesSort.Trending,
