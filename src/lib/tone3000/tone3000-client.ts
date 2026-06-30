@@ -490,59 +490,24 @@ export async function refreshTokens(
   refreshToken: string,
   publishableKey: string
 ): Promise<T3KTokens> {
-  let retries = 5;
-  let delay = 2000;
+  const res = await fetch(`${T3K_API}/api/v1/oauth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+      client_id: publishableKey,
+    }),
+  });
 
-  while (retries >= 0) {
-    try {
-      const res = await fetch(`${T3K_API}/api/v1/oauth/token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          grant_type: 'refresh_token',
-          refresh_token: refreshToken,
-          client_id: publishableKey,
-        }),
-      });
+  if (!res.ok) throw new Error('Token refresh failed');
 
-      if (res.ok) {
-        const data = await res.json();
-        return {
-          access_token: data.access_token,
-          refresh_token: data.refresh_token,
-          expires_at: Date.now() + data.expires_in * 1000,
-        };
-      }
-
-      if (res.status >= 400 && res.status < 500 && res.status !== 429) {
-        const err: any = new Error('Invalid refresh token');
-        err.status = res.status;
-        err.isAuthError = true;
-        throw err;
-      }
-
-      if (retries === 0) {
-        const err: any = new Error(`Token refresh failed: ${res.status}`);
-        err.status = res.status;
-        err.isAuthError = false;
-        throw err;
-      }
-      await new Promise(r => setTimeout(r, delay));
-      delay *= 2;
-      retries--;
-    } catch (err: any) {
-      if (err.isAuthError) throw err;
-      
-      if (retries === 0) {
-        err.isAuthError = false;
-        throw err;
-      }
-      await new Promise(r => setTimeout(r, delay));
-      delay *= 2;
-      retries--;
-    }
-  }
-  throw new Error('Unreachable');
+  const data = await res.json();
+  return {
+    access_token: data.access_token,
+    refresh_token: data.refresh_token,
+    expires_at: Date.now() + data.expires_in * 1000,
+  };
 }
 
 // ─── Authenticated API client ─────────────────────────────────────────────────
@@ -600,14 +565,12 @@ export class T3KClient {
       if (!this.refreshPromise) {
         this.refreshPromise = refreshTokens(tokens.refresh_token, this.publishableKey)
           .then((t) => { this.setTokens(t); this.refreshPromise = null; return t; })
-          .catch((err: any) => {
-              this.refreshPromise = null;
-              if (err.isAuthError) {
-                this.clearTokens();
-                if (this.onAuthRequired) this.onAuthRequired();
-              }
-              throw err;
-            });
+          .catch((err) => {
+            this.clearTokens();
+            this.refreshPromise = null;
+            this.onAuthRequired();
+            throw err;
+          });
       }
       return (await this.refreshPromise).access_token;
     }
@@ -625,11 +588,19 @@ export class T3KClient {
   async fetch(path: string, init?: RequestInit): Promise<Response> {
     const resolve = (p: string) => (/^https?:\/\//.test(p) ? p : `${T3K_API}${p}`);
     
-    let res: Response | undefined;
+    let res!: Response;
     let retries = 5;
     let delay = 2000;
 
     while (retries >= 0) {
+      const token = await this.getAccessToken();
+      res = await globalThis.fetch(resolve(path), {
+        ...init,
+        headers: { ...init?.headers, Authorization: `Bearer ${token}` },
+      });
+
+      // Retry once on 401 — handles expiry race conditions between refresh check and request
+      if (res.status === 401) {
         const stored = this.getTokens();
         if (stored) {
           this.setTokens({ ...stored, expires_at: 0 }); // force a refresh on next call
