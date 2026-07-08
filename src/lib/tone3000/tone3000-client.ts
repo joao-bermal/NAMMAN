@@ -11,7 +11,7 @@
  *   4. Use T3KClient to make authenticated API requests
  */
 
-import { T3K_API } from './config';
+import { T3K_API, SUPABASE_ANON_KEY } from './config';
 import type {
   User, Tone, Model, PublicUser,
   PaginatedResponse, SearchTonesParams, ListModelsParams,
@@ -729,15 +729,58 @@ export class T3KClient {
 
   /** Browse any public user's tones by their username. */
   async listUserTones(username: string, params?: { page?: number; pageSize?: number }): Promise<PaginatedResponse<Tone>> {
-    // First try the created endpoint with username filter
-    // Falls back to searchTones filtered by query if not supported
-    const qs = new URLSearchParams();
-    if (params?.page) qs.set('page', String(params.page));
-    if (params?.pageSize) qs.set('page_size', String(params.pageSize));
-    qs.set('username', username);
-    const res = await this.fetch(`/api/v1/tones/created?${qs}`);
-    if (!res.ok) throw new Error(`listUserTones failed: ${res.status}`);
-    return res.json();
+    const page = params?.page ?? 1;
+    const pageSize = params?.pageSize ?? 15;
+    const token = await this.getAccessToken();
+
+    const body = {
+      query_term: "",
+      page_number: page,
+      page_size: pageSize,
+      order_by: "newest",
+      tag_names: null,
+      make_names: null,
+      gear_filters: null,
+      is_calibrated: false,
+      size_filters: null,
+      usernames: [username],
+      architecture_filter: null
+    };
+
+    const res = await globalThis.fetch("https://api.tone3000.com/rest/v1/rpc/search_tones_a2", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "apikey": SUPABASE_ANON_KEY,
+        "Authorization": `Bearer ${token}`
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!res.ok) throw new Error(`listUserTones RPC failed: ${res.status}`);
+    const data = await res.json();
+    
+    // Map data to fit Tone interface and total count
+    const total = data[0]?.total_count ?? 0;
+    const total_pages = Math.ceil(total / pageSize) || 1;
+
+    const mappedData = data.map((item: any) => ({
+      ...item,
+      user: {
+        id: item.user_id,
+        username: item.username,
+        avatar_url: item.avatar_url,
+        url: `https://www.tone3000.com/${item.username}`
+      }
+    }));
+
+    return {
+      data: mappedData,
+      page,
+      page_size: pageSize,
+      total,
+      total_pages
+    };
   }
 
   /** Get tones favorited by the authenticated user. */

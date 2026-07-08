@@ -107,6 +107,7 @@ type DirectoryPickerWindow = Window & {
 };
 
 export default function Home() {
+  const router = useRouter();
   const [connected, setConnected] = useState<boolean | null>(null);
   const [username, setUsername] = useState('');
   const [authError, setAuthError] = useState('');
@@ -503,6 +504,94 @@ export default function Home() {
     }
   };
 
+  const handleBulkDownload = async (ids: number[]) => {
+    const resultsMap = new Map(results.map(t => [t.id, t]));
+    const initialItems = ids.map(id => ({
+      id,
+      title: resultsMap.get(id)?.title ?? `Tone #${id}`,
+      status: 'pending' as const
+    }));
+    setBulkItems(initialItems);
+    setIsBulkPanelOpen(true);
+    setSelectionMode(false);
+    setSelectedIds(new Set());
+
+    ids.forEach(id => {
+      syncQueueRef.current.push(async () => {
+        setBulkItems(prev => prev.map(item => item.id === id ? { ...item, status: 'syncing' } : item));
+        setDownloadingItems(prev => new Set(prev).add(id));
+        try {
+          let tone = resultsMap.get(id);
+          if (!tone) {
+            tone = await client.getTone(id);
+            if (tone) {
+              setBulkItems(prev => prev.map(item => item.id === id ? { ...item, title: tone!.title } : item));
+            }
+          }
+          if (tone) {
+            await doDownload(tone);
+            setBulkItems(prev => prev.map(item => item.id === id ? { ...item, status: 'done' } : item));
+          } else {
+            throw new Error('Tone not found');
+          }
+        } catch (err) {
+          console.error(`Bulk download failed for id ${id}:`, err);
+          setBulkItems(prev => prev.map(item => item.id === id ? { ...item, status: 'error' } : item));
+        } finally {
+          setDownloadingItems(prev => {
+            const n = new Set(prev);
+            n.delete(id);
+            return n;
+          });
+        }
+      });
+    });
+
+    processSyncQueue();
+  };
+
+  const handleDownloadAllMyDownloads = async () => {
+    setIsSearching(true);
+    addToast('Fetching your download history...', 'info');
+    try {
+      const allIds: number[] = [];
+      let page = 1;
+      let pages = 1;
+      do {
+        const res = await client.listDownloadedTones({ page, pageSize: 100 });
+        res.data.forEach(t => allIds.push(t.id));
+        pages = res.total_pages || 1;
+        page += 1;
+      } while (page <= pages && page <= 20);
+
+      if (allIds.length === 0) {
+        addToast('No downloads to sync.', 'info');
+        return;
+      }
+
+      await handleBulkDownload(allIds);
+    } catch (err: any) {
+      console.error(err);
+      addToast(`Failed to fetch downloads: ${err.message}`, 'error');
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  const handleSelectPage = () => {
+    const pageIds = results.map(t => t.id);
+    const allSelected = pageIds.every(id => selectedIds.has(id));
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (allSelected) {
+        pageIds.forEach(id => next.delete(id));
+      } else {
+        pageIds.forEach(id => next.add(id));
+      }
+      return next;
+    });
+  };
+
   // ── Render ────────────────────────────────────────────────────────────────
   if (connected === null) {
     return (
@@ -541,7 +630,7 @@ export default function Home() {
   }
 
   return (
-    <main>
+    <main style={{ paddingBottom: selectionMode ? '100px' : '40px' }}>
       <div className="header" style={{ display: 'flex', flexWrap: 'wrap', gap: '1rem', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem', paddingBottom: '1.5rem', borderBottom: '1px solid var(--surface-border)' }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
           <h1 style={{ fontSize: '3rem', margin: 0 }} className="t3k-logo">NAMMAN</h1>
@@ -579,10 +668,30 @@ export default function Home() {
         </button>
       </div>
 
-      <div style={{ display: 'flex', gap: '1rem', marginBottom: '2rem', borderBottom: '1px solid var(--surface-border)', paddingBottom: '1rem' }}>
-        <button className={`tab-btn ${activeTab === 'search' ? 'active' : ''}`} onClick={() => { setActiveTab('search'); setCurrentPage(1); }}>Search</button>
-        <button className={`tab-btn ${activeTab === 'favorites' ? 'active' : ''}`} onClick={() => { setActiveTab('favorites'); setCurrentPage(1); }}>My Favorites</button>
-        <button className={`tab-btn ${activeTab === 'downloads' ? 'active' : ''}`} onClick={() => { setActiveTab('downloads'); setCurrentPage(1); }}>My Downloads</button>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem', borderBottom: '1px solid var(--surface-border)', paddingBottom: '1rem', flexWrap: 'wrap', gap: '1rem' }}>
+        <div style={{ display: 'flex', gap: '1rem' }}>
+          <button className={`tab-btn ${activeTab === 'search' ? 'active' : ''}`} onClick={() => { setActiveTab('search'); setCurrentPage(1); setSelectionMode(false); setSelectedIds(new Set()); }}>Search</button>
+          <button className={`tab-btn ${activeTab === 'favorites' ? 'active' : ''}`} onClick={() => { setActiveTab('favorites'); setCurrentPage(1); setSelectionMode(false); setSelectedIds(new Set()); }}>My Favorites</button>
+          <button className={`tab-btn ${activeTab === 'downloads' ? 'active' : ''}`} onClick={() => { setActiveTab('downloads'); setCurrentPage(1); setSelectionMode(false); setSelectedIds(new Set()); }}>My Downloads</button>
+        </div>
+        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+          <button
+            className="action-btn"
+            onClick={() => { setSelectionMode(m => !m); setSelectedIds(new Set()); }}
+            style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: selectionMode ? 'var(--primary-color)' : undefined, color: selectionMode ? '#000' : undefined }}
+          >
+            <CheckSquare size={16} /> {selectionMode ? 'Cancel Selection' : 'Select'}
+          </button>
+          {activeTab === 'downloads' && (
+            <button
+              className="action-btn"
+              onClick={handleDownloadAllMyDownloads}
+              style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: 'var(--primary-color)', color: '#000', border: 'none' }}
+            >
+              <Download size={16} /> Download All
+            </button>
+          )}
+        </div>
       </div>
 
       <div style={{ marginBottom: '3rem' }}>
@@ -651,6 +760,21 @@ export default function Home() {
         </div>
       </div>
 
+      {/* Selection toolbar */}
+      {selectionMode && (
+        <div style={{ background: 'var(--surface-color)', border: '1px solid var(--primary-color)', borderRadius: '12px', padding: '0.8rem 1.2rem', marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+          <span style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>
+            {selectedIds.size} selected
+          </span>
+          <button className="action-btn" onClick={handleSelectPage} style={{ fontSize: '0.85rem', padding: '0.4rem 0.9rem' }}>
+            Select This Page
+          </button>
+          <button className="action-btn" onClick={() => setSelectedIds(new Set())} style={{ fontSize: '0.85rem', padding: '0.4rem 0.9rem' }}>
+            Clear Selection
+          </button>
+        </div>
+      )}
+
       <div className="models-list">
         {results.map(tone => {
           const isDownloaded = downloadedIds.has(tone.id);
@@ -659,15 +783,45 @@ export default function Home() {
           const fsSupported = typeof window !== 'undefined' && 'showDirectoryPicker' in window;
           const downloadDisabled = downloadingItems.has(tone.id) || (fsSupported && !dirHandle);
 
+          const isSelected = selectedIds.has(tone.id);
           return (
-            <div key={tone.id} className="model-card" style={{ borderRadius: '16px', padding: '1.2rem 1.5rem', alignItems: 'center' }}>
-              <div className="model-image-container" style={{ borderRadius: '12px', width: '130px', height: '130px', marginRight: '2rem' }}>
+            <div
+              key={tone.id}
+              className="model-card"
+              onClick={() => {
+                if (selectionMode) {
+                  setSelectedIds(prev => {
+                    const next = new Set(prev);
+                    if (next.has(tone.id)) next.delete(tone.id);
+                    else next.add(tone.id);
+                    return next;
+                  });
+                }
+              }}
+              style={{
+                borderRadius: '16px',
+                padding: '1.2rem 1.5rem',
+                alignItems: 'center',
+                outline: isSelected ? '2px solid var(--primary-color)' : undefined,
+                background: isSelected ? 'rgba(var(--primary-rgb, 0, 255, 128), 0.05)' : undefined,
+                cursor: selectionMode ? 'pointer' : 'default'
+              }}
+            >
+              {selectionMode && (
+                <div
+                  style={{ marginRight: '1.5rem', color: isSelected ? 'var(--primary-color)' : 'var(--text-muted)', flexShrink: 0 }}
+                >
+                  {isSelected ? <CheckSquare size={24} /> : <Square size={24} />}
+                </div>
+              )}
+
+              <div className="model-image-container" style={{ borderRadius: '12px', width: '130px', height: '130px', marginRight: '2rem', flexShrink: 0 }}>
                 {image ? <img src={image} alt={tone.title} className="model-image" /> : <Folder size={32} color="#555" />}
               </div>
               <div className="model-info" style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '0.8rem', padding: '0.5rem 0' }}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
                   <h3 className="model-title" style={{ fontSize: '1.3rem', margin: 0, lineHeight: 1.2 }}>
-                    <a href={toneHref(tone)} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none' }}>
+                    <a href={toneHref(tone)} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={{ color: 'inherit', textDecoration: 'none' }}>
                       {tone.title} <ExternalLink size={14} style={{ opacity: 0.5, marginLeft: '4px' }} />
                     </a>
                   </h3>
@@ -682,19 +836,28 @@ export default function Home() {
 
                 <div className="model-stats" style={{ margin: 0 }}>
                   <div className="stat-item"><DownloadCloud size={16} /> {tone.downloads_count}</div>
-                  <div className={`stat-item stat-action ${isFavorited ? 'active' : ''}`} onClick={() => toggleFavorite(tone)}>
+                  <div className={`stat-item stat-action ${isFavorited ? 'active' : ''}`} onClick={(e) => { e.stopPropagation(); toggleFavorite(tone); }}>
                     <Bookmark size={16} fill={isFavorited ? 'currentColor' : 'none'} /> {tone.favorites_count}
                   </div>
                   <div className="stat-item"><Folder size={16} /> {activeArchitecture === '2' ? (tone.a2_models_count || tone.models_count) : tone.models_count}</div>
                 </div>
 
-                <div className="model-author-row" style={{ marginTop: 0 }}>
+                <div
+                  className="model-author-row"
+                  style={{ marginTop: 0, cursor: 'pointer' }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (tone.user?.username) {
+                      router.push(`/creator/${tone.user.username}`);
+                    }
+                  }}
+                >
                   {tone.user?.avatar_url ? (
                     <img src={tone.user.avatar_url} alt={tone.user.username} className="author-avatar" />
                   ) : (
                     <div className="author-avatar" />
                   )}
-                  <span style={{ fontWeight: 500, color: 'var(--text-primary)' }}>{tone.user?.username}</span>
+                  <span style={{ fontWeight: 500, color: 'var(--text-primary)', textDecoration: 'underline' }} title={`Browse all tones by ${tone.user?.username}`}>{tone.user?.username}</span>
                   {tone.created_at && (
                     <>
                       <span style={{ color: 'var(--text-muted)' }}>•</span>
@@ -707,13 +870,18 @@ export default function Home() {
               <div style={{ paddingLeft: '2rem' }}>
                 <button
                   className="action-btn"
-                  onClick={() => handleDownload(tone)}
-                  disabled={downloadDisabled}
+                  onClick={(e) => {
+                    if (!selectionMode) {
+                      e.stopPropagation();
+                      handleDownload(tone);
+                    }
+                  }}
+                  disabled={downloadDisabled && !selectionMode}
                   style={{ 
                     color: isDownloaded ? '#10b981' : undefined, 
                     borderColor: isDownloaded ? '#10b981' : undefined, 
                     backgroundColor: isDownloaded ? 'rgba(16, 185, 129, 0.1)' : undefined,
-                    opacity: downloadDisabled && !downloadingItems.has(tone.id) ? 0.5 : 1,
+                    opacity: downloadDisabled && !downloadingItems.has(tone.id) && !selectionMode ? 0.5 : 1,
                     padding: '0.8rem 1.5rem',
                     borderRadius: '50px',
                     fontWeight: 600
@@ -748,7 +916,86 @@ export default function Home() {
         </div>
       )}
 
-      <div style={{ position: 'fixed', bottom: '20px', right: '20px', display: 'flex', flexDirection: 'column', gap: '10px', zIndex: 9999 }}>
+      {/* Floating bulk bar */}
+      {selectionMode && selectedIds.size > 0 && (
+        <div style={{
+          position: 'fixed', bottom: '24px', left: '50%', transform: 'translateX(-50%)',
+          background: 'var(--surface-color)', border: '1px solid var(--primary-color)',
+          borderRadius: '50px', padding: '0.8rem 1.5rem',
+          display: 'flex', alignItems: 'center', gap: '1rem',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.5)', zIndex: 9000, whiteSpace: 'nowrap'
+        }}>
+          <span style={{ fontWeight: 600 }}>{selectedIds.size} selected</span>
+          <button
+            className="action-btn"
+            onClick={() => handleBulkDownload(Array.from(selectedIds))}
+            style={{ background: 'var(--primary-color)', color: '#000', border: 'none', borderRadius: '50px', padding: '0.6rem 1.2rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}
+          >
+            <Download size={16} /> Sync Selected
+          </button>
+          <button onClick={() => setSelectedIds(new Set())} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}>
+            <X size={18} />
+          </button>
+        </div>
+      )}
+
+      {/* Bulk progress panel */}
+      {isBulkPanelOpen && bulkItems.length > 0 && (
+        <div style={{
+          position: 'fixed', top: 0, right: 0, width: '360px', height: '100vh',
+          background: 'var(--surface-color)', borderLeft: '1px solid var(--surface-border)',
+          display: 'flex', flexDirection: 'column', zIndex: 9500,
+          boxShadow: '-8px 0 32px rgba(0,0,0,0.4)',
+          transform: isBulkPanelOpen ? 'translateX(0)' : 'translateX(100%)',
+          transition: 'transform 0.3s ease'
+        }}>
+          <div style={{ padding: '1.5rem', borderBottom: '1px solid var(--surface-border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div>
+              <h3 style={{ margin: 0, fontSize: '1.1rem', color: '#fff' }}>Bulk Download</h3>
+              <p style={{ margin: '0.3rem 0 0', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                {bulkItems.filter(i => i.status === 'done').length} / {bulkItems.length} completed
+                {bulkItems.filter(i => i.status === 'error').length > 0 && ` · ${bulkItems.filter(i => i.status === 'error').length} errors`}
+              </p>
+            </div>
+            <button onClick={() => setIsBulkPanelOpen(false)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}>
+              <X size={20} />
+            </button>
+          </div>
+
+          {/* Progress bar */}
+          <div style={{ padding: '0.8rem 1.5rem', borderBottom: '1px solid var(--surface-border)' }}>
+            <div style={{ height: '6px', borderRadius: '3px', background: 'var(--bg-color)', overflow: 'hidden' }}>
+              {(() => {
+                const done = bulkItems.filter(i => i.status === 'done').length;
+                const errors = bulkItems.filter(i => i.status === 'error').length;
+                const progress = bulkItems.length > 0 ? Math.round(((done + errors) / bulkItems.length) * 100) : 0;
+                return (
+                  <div style={{ height: '100%', width: `${progress}%`, background: 'var(--primary-color)', transition: 'width 0.4s ease', borderRadius: '3px' }} />
+                );
+              })()}
+            </div>
+          </div>
+
+          {/* Item list */}
+          <div style={{ flex: 1, overflowY: 'auto', padding: '0.5rem 0' }}>
+            {bulkItems.map(item => (
+              <div key={item.id} style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', padding: '0.7rem 1.5rem', borderBottom: '1px solid var(--surface-border)' }}>
+                <div style={{ fontSize: '1rem', flexShrink: 0 }}>
+                  {item.status === 'pending' && <span style={{ color: 'var(--text-muted)' }}>⏳</span>}
+                  {item.status === 'syncing' && <span style={{ color: '#3b82f6', animation: 'spin 1s linear infinite', display: 'inline-block' }}>⟳</span>}
+                  {item.status === 'done' && <span style={{ color: '#10b981' }}>✅</span>}
+                  {item.status === 'error' && <span style={{ color: '#ef4444' }}>❌</span>}
+                </div>
+                <span style={{ fontSize: '0.85rem', color: item.status === 'error' ? '#ef4444' : item.status === 'done' ? 'var(--text-muted)' : 'var(--text-primary)', flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {item.title}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div style={{ position: 'fixed', bottom: '20px', right: isBulkPanelOpen && bulkItems.length > 0 ? '380px' : '20px', display: 'flex', flexDirection: 'column', gap: '10px', zIndex: 9999, transition: 'right 0.3s ease' }}>
         {toasts.map(toast => (
           <div key={toast.id} style={{ background: toast.type === 'success' ? '#10b981' : toast.type === 'error' ? '#ef4444' : '#3b82f6', color: 'white', padding: '12px 20px', borderRadius: '8px', boxShadow: '0 4px 6px rgba(0,0,0,0.2)' }}>
             {toast.message}

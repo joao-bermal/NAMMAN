@@ -9,6 +9,8 @@ export const T3K_API = (
   process.env.NEXT_PUBLIC_T3K_API_DOMAIN ?? 'https://www.tone3000.com'
 ).replace(/\/+$/, '');
 
+export const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd6eWJpdW9weGtkeGJ5dG5vamRzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MzgwODIxNjUsImV4cCI6MjA1MzY1ODE2NX0.Gq66BJXjtLsqP2nAGXm9Xb9PAjoeZalWUj66K4nmVSU';
+
 // Your publishable key (t3k_pub_…) — used as client_id in OAuth flows.
 export const PUBLISHABLE_KEY = process.env.NEXT_PUBLIC_TONE3000_CLIENT_ID ?? '';
 

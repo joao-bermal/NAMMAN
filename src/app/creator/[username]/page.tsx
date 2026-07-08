@@ -272,9 +272,15 @@ export default function CreatorPage() {
   };
 
   const selectAllOnPage = () => {
+    const toneIds = tones.map(t => t.id);
+    const allSelected = toneIds.every(id => selectedIds.has(id));
     setSelectedIds(prev => {
       const next = new Set(prev);
-      tones.forEach(t => next.add(t.id));
+      if (allSelected) {
+        toneIds.forEach(id => next.delete(id));
+      } else {
+        toneIds.forEach(id => next.add(id));
+      }
       return next;
     });
   };
@@ -295,7 +301,7 @@ export default function CreatorPage() {
   const bulkProgress = bulkItems.length > 0 ? Math.round(((bulkDone + bulkErrors) / bulkItems.length) * 100) : 0;
 
   return (
-    <main className="container">
+    <main className="container" style={{ paddingBottom: selectionMode ? '100px' : '40px' }}>
       {/* Header */}
       <div style={{ marginBottom: '2rem' }}>
         <button
@@ -367,16 +373,21 @@ export default function CreatorPage() {
               <div
                 key={tone.id}
                 className="model-card"
+                onClick={() => {
+                  if (selectionMode) {
+                    toggleSelectTone(tone.id);
+                  }
+                }}
                 style={{
                   borderRadius: '16px', padding: '1.2rem 1.5rem', alignItems: 'center',
                   outline: isSelected ? '2px solid var(--primary-color)' : undefined,
                   background: isSelected ? 'rgba(var(--primary-rgb, 0,255,128), 0.05)' : undefined,
+                  cursor: selectionMode ? 'pointer' : 'default'
                 }}
               >
                 {selectionMode && (
                   <div
-                    onClick={() => toggleSelectTone(tone.id)}
-                    style={{ cursor: 'pointer', marginRight: '1rem', color: isSelected ? 'var(--primary-color)' : 'var(--text-muted)', flexShrink: 0 }}
+                    style={{ marginRight: '1rem', color: isSelected ? 'var(--primary-color)' : 'var(--text-muted)', flexShrink: 0 }}
                   >
                     {isSelected ? <CheckSquare size={22} /> : <Square size={22} />}
                   </div>
@@ -388,7 +399,7 @@ export default function CreatorPage() {
 
                 <div className="model-info" style={{ flex: 1 }}>
                   <h3 className="model-title" style={{ fontSize: '1.2rem', margin: '0 0 0.3rem' }}>
-                    <a href={`https://www.tone3000.com/tones/${tone.id}`} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none' }}>
+                    <a href={`https://www.tone3000.com/tones/${tone.id}`} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={{ color: 'inherit', textDecoration: 'none' }}>
                       {tone.title} <ExternalLink size={13} style={{ opacity: 0.4 }} />
                     </a>
                   </h3>
@@ -407,7 +418,12 @@ export default function CreatorPage() {
                 <div style={{ paddingLeft: '1.5rem' }}>
                   <button
                     className="action-btn"
-                    onClick={() => selectionMode ? toggleSelectTone(tone.id) : handleDownload(tone)}
+                    onClick={(e) => {
+                      if (!selectionMode) {
+                        e.stopPropagation();
+                        handleDownload(tone);
+                      }
+                    }}
                     disabled={isSyncing && !selectionMode}
                     style={{
                       color: isDownloaded ? '#10b981' : undefined,
