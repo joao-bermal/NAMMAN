@@ -6,8 +6,9 @@
  * the React-Compiler set-state-in-effect heuristic is disabled for this file. */
 /* eslint-disable react-hooks/set-state-in-effect */
 
-import { useState, useEffect, useCallback } from 'react';
-import { DownloadCloud, CheckCircle, Bookmark, Folder, FolderOpen, ExternalLink, LogOut, Layers, Server, Box, Sliders, Radio, Activity, Search, Grid } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { useRouter } from 'next/navigation';
+import { DownloadCloud, CheckCircle, Bookmark, Folder, FolderOpen, ExternalLink, LogOut, Layers, Server, Box, Sliders, Radio, Activity, Search, Grid, Download, X, CheckSquare, Square } from 'lucide-react';
 import { get, set } from 'idb-keyval';
 
 import { PUBLISHABLE_KEY, getRedirectUri } from '@/lib/tone3000/config';
@@ -26,7 +27,6 @@ const client = new T3KClient(PUBLISHABLE_KEY, () => {
   if (typeof window !== 'undefined') startStandardFlow(PUBLISHABLE_KEY, getRedirectUri());
 });
 
-const DOWNLOAD_HISTORY_KEY = 't3k_download_history';
 const DIR_HANDLE_KEY = 'nam_profiles_handle';
 const PAGE_SIZE = 15;
 
@@ -56,18 +56,7 @@ function timeAgo(dateString: string) {
 }
 
 const gearLabel = (tone: Tone): string => {
-  let g = tone.gear?.toLowerCase() || 'unknown';
-  
-  // If it's outboard, check tags for a more specific category
-  if (g === 'outboard' && tone.tags) {
-    const tagNames = tone.tags.map(t => t.name.toLowerCase());
-    if (tagNames.some(t => t.includes('amp-cab') || t.includes('full-rig'))) g = 'amp-cab';
-    else if (tagNames.some(t => t.includes('amp'))) g = 'amp-head';
-    else if (tagNames.some(t => t.includes('cab') || t.includes('ir'))) g = 'cabinet';
-    else if (tagNames.some(t => t.includes('pedal'))) g = 'pedal';
-    else if (tagNames.some(t => t.includes('space'))) g = 'spaces';
-    else if (tagNames.some(t => t.includes('experimental'))) g = 'experimental';
-  }
+  const g = tone.gear?.toLowerCase() || 'unknown';
 
   if (g === 'full-rig' || g === 'amp-cab' || g === 'amp_cab' || g === 'amp+cab') return 'Amp + Cab';
   if (g === 'amp' || g === 'amp-head' || g === 'amp_head') return 'Amp Head';
@@ -82,17 +71,7 @@ const gearLabel = (tone: Tone): string => {
 };
 
 const gearFolder = (tone: Tone): string => {
-  let g = tone.gear?.toLowerCase() || 'unknown';
-  
-  if (g === 'outboard' && tone.tags) {
-    const tagNames = tone.tags.map(t => t.name.toLowerCase());
-    if (tagNames.some(t => t.includes('amp-cab') || t.includes('full-rig'))) g = 'amp-cab';
-    else if (tagNames.some(t => t.includes('amp'))) g = 'amp-head';
-    else if (tagNames.some(t => t.includes('cab') || t.includes('ir'))) g = 'cabinet';
-    else if (tagNames.some(t => t.includes('pedal'))) g = 'pedal';
-    else if (tagNames.some(t => t.includes('space'))) g = 'spaces';
-    else if (tagNames.some(t => t.includes('experimental'))) g = 'experimental';
-  }
+  const g = tone.gear?.toLowerCase() || 'unknown';
 
   if (g === 'full-rig' || g === 'amp-cab' || g === 'amp_cab' || g === 'amp+cab') return 'Amp_and_Cab';
   if (g === 'amp' || g === 'amp-head' || g === 'amp_head') return 'Amps';
@@ -144,9 +123,33 @@ export default function Home() {
   const [sortBy, setSortBy] = useState<string>('trending');
 
   const [favoriteIds, setFavoriteIds] = useState<Set<number>>(new Set());
-  const [downloadHistory, setDownloadHistory] = useState<Tone[]>([]);
+  const [downloadedIds, setDownloadedIds] = useState<Set<number>>(new Set());
   const [downloadingItems, setDownloadingItems] = useState<Set<number>>(new Set());
   const [autoFavorite, setAutoFavorite] = useState(false);
+
+  // ── Bulk selection + progress panel ───────────────────────────────────────
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  type BulkItem = { id: number; title: string; status: 'pending'|'syncing'|'done'|'error' };
+  const [bulkItems, setBulkItems] = useState<BulkItem[]>([]);
+  const [isBulkPanelOpen, setIsBulkPanelOpen] = useState(false);
+
+  // ── Global sync job queue (serializes API calls to avoid Vercel WAF blocks) ─
+  const syncQueueRef = useRef<(() => Promise<void>)[]>([]);
+  const syncRunningRef = useRef(false);
+  const processSyncQueue = useCallback(() => {
+    if (syncRunningRef.current) return;
+    const next = syncQueueRef.current.shift();
+    if (!next) return;
+    syncRunningRef.current = true;
+    next().finally(() => {
+      syncRunningRef.current = false;
+      // Wait 3s between jobs so Vercel WAF rate-limit window resets
+      if (syncQueueRef.current.length > 0) {
+        setTimeout(() => processSyncQueue(), 3000);
+      }
+    });
+  }, []);
 
   const [dirHandle, setDirHandle] = useState<FileSystemDirectoryHandle | null>(null);
   const [toasts, setToasts] = useState<{ id: string; message: string; type: 'success' | 'error' | 'info' }[]>([]);
@@ -215,6 +218,23 @@ export default function Home() {
     }
   }, []);
 
+  const loadDownloadedIds = useCallback(async () => {
+    try {
+      const ids = new Set<number>();
+      let page = 1;
+      let pages = 1;
+      do {
+        const res = await client.listDownloadedTones({ page, pageSize: 100 });
+        res.data.forEach(t => ids.add(t.id));
+        pages = res.total_pages || 1;
+        page += 1;
+      } while (page <= pages && page <= 20); // cap at 2000 tones
+      setDownloadedIds(ids);
+    } catch {
+      // Non-fatal — badge state won't be pre-filled
+    }
+  }, []);
+
   const bootstrapConnected = useCallback(async () => {
     setConnected(true);
     try {
@@ -224,9 +244,9 @@ export default function Home() {
       // ignore — name is cosmetic
     }
     loadFavoriteIds();
-    get<Tone[]>(DOWNLOAD_HISTORY_KEY).then(h => h && setDownloadHistory(h));
+    loadDownloadedIds();
     loadDirHandle();
-  }, [loadFavoriteIds, loadDirHandle]);
+  }, [loadFavoriteIds, loadDownloadedIds, loadDirHandle]);
 
   useEffect(() => {
     if (!PUBLISHABLE_KEY) {
@@ -277,28 +297,31 @@ export default function Home() {
 
   // ── Data fetching ─────────────────────────────────────────────────────────
   const fetchResults = useCallback(async (tab: Tab, searchTerm: string, page: number, category: string, sort: string, architecture: string) => {
-    if (tab === 'downloads') {
-      const history = (await get<Tone[]>(DOWNLOAD_HISTORY_KEY)) ?? [];
-      setDownloadHistory(history);
-      setResults(history);
-      setTotalPages(1);
-      return;
-    }
-
     setIsSearching(true);
     try {
-      if (tab === 'favorites') {
+      if (tab === 'downloads') {
+        const res = await client.listDownloadedTones({ page, pageSize: PAGE_SIZE });
+        setResults(res.data);
+        setTotalPages(res.total_pages || 1);
+      } else if (tab === 'favorites') {
         const res = await client.listFavoritedTones({ page, pageSize: PAGE_SIZE });
         setResults(res.data);
         setTotalPages(res.total_pages || 1);
       } else {
         const effectiveArchitecture = category === 'ir' ? undefined : architecture;
+        
+        let query = searchTerm || undefined;
+        let gears = category ? [category as Gear] : undefined;
+        if (category === 'amp-cab') {
+          gears = ['amp-cab', 'full-rig'] as Gear[];
+        }
+
         const res = await client.searchTones({
-          query: searchTerm || undefined,
+          query,
           page,
           pageSize: PAGE_SIZE,
           sort: sortMap[sort] ?? TonesSort.Trending,
-          gears: category ? [category as Gear] : undefined,
+          gears,
           architecture: (effectiveArchitecture || undefined) as ArchitectureVersion | undefined,
         });
         
@@ -313,7 +336,7 @@ export default function Home() {
     } finally {
       setIsSearching(false);
     }
-  }, [addToast]);
+  }, [client, addToast]);
 
   useEffect(() => {
     if (connected) {
@@ -358,22 +381,22 @@ export default function Home() {
     }
   };
 
-  // ── File sync (core feature) ──────────────────────────────────────────────
-  const recordDownload = async (tone: Tone) => {
-    const history = (await get<Tone[]>(DOWNLOAD_HISTORY_KEY)) ?? [];
-    const next = [tone, ...history.filter(t => t.id !== tone.id)];
-    await set(DOWNLOAD_HISTORY_KEY, next);
-    setDownloadHistory(next);
+  const handleDownload = (tone: Tone) => {
+    // Immediately show the tone as "syncing" so the UI is responsive
+    setDownloadingItems(prev => new Set(prev).add(tone.id));
+
+    // Enqueue the actual work to run serially — this prevents parallel API burst
+    syncQueueRef.current.push(() => doDownload(tone));
+    processSyncQueue();
   };
 
-  const handleDownload = async (tone: Tone) => {
+  const doDownload = async (tone: Tone) => {
     const fsSupported = typeof window !== 'undefined' && 'showDirectoryPicker' in window;
     if (fsSupported && !dirHandle) {
       addToast('Select a local folder above first.', 'info');
       return;
     }
 
-    setDownloadingItems(prev => new Set(prev).add(tone.id));
     try {
       if (dirHandle) {
         const perm = await (dirHandle as DirectoryHandleWithPermissions).requestPermission({ mode: 'readwrite' });
@@ -385,10 +408,11 @@ export default function Home() {
 
       // Pull legacy (A1 + Custom) and A2 models, then merge — the API has no
       // single "all architectures" view.
-      const [legacy, a2] = await Promise.all([
-        client.listModels(tone.id, { pageSize: 100 }),
-        client.listModels(tone.id, { pageSize: 100, architecture: 2 }),
-      ]);
+      // NOTE: We call these sequentially (not Promise.all) so they go through
+      // the client request queue and don't trigger Vercel WAF when many tones
+      // are synced at once.
+      const legacy = await client.listModels(tone.id, { pageSize: 100 });
+      const a2 = await client.listModels(tone.id, { pageSize: 100, architecture: 2 });
       let models: Model[] = [...legacy.data, ...a2.data];
 
       // Filter by the selected architecture (keep IRs/non-NAM regardless).
@@ -425,7 +449,7 @@ export default function Home() {
         const m = models[i];
         try {
           if (!m.model_url) continue;
-          const res = await client.fetch(m.model_url);
+          const res = await client.directDownload(m.model_url);
           if (!res.ok) throw new Error(`Failed to download ${m.name} (${res.status})`);
           const blob = await res.blob();
 
@@ -452,24 +476,14 @@ export default function Home() {
             document.body.appendChild(a);
             a.click();
             a.remove();
-            setTimeout(() => URL.revokeObjectURL(url), 10_000);
-            await new Promise(r => setTimeout(r, 400));
           }
         } catch (err) {
           console.error(`Error downloading model ${m.name}:`, err);
           // Swallowing individual model error so the rest of the pack can sync
         }
-
-        // Delay 2000ms between each file to be absolutely safe with Tone3000 rate limit
-        if (i < models.length - 1) {
-          await new Promise(r => setTimeout(r, 2000));
-        }
       }
 
-      await recordDownload(tone);
-      if (autoFavorite && !favoriteIds.has(tone.id)) {
-        await toggleFavorite(tone);
-      }
+      await client.trackDownload(tone.id).catch(console.error);
       addToast(`Synced "${tone.title}" (${models.length} model${models.length > 1 ? 's' : ''}).`, 'success');
     } catch (err: any) {
       console.error(err);
@@ -479,6 +493,8 @@ export default function Home() {
         addToast(`Error syncing "${tone.title}".`, 'error');
       }
     } finally {
+      // Mark as downloaded immediately in local state
+      setDownloadedIds(prev => new Set(prev).add(tone.id));
       setDownloadingItems(prev => {
         const n = new Set(prev);
         n.delete(tone.id);
@@ -557,15 +573,6 @@ export default function Home() {
               'Select a folder on your computer to enable direct sync.'
             )}
           </p>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginTop: '1.2rem', cursor: 'pointer', color: 'var(--text-muted)', fontSize: '1rem' }}>
-            <input 
-              type="checkbox" 
-              checked={autoFavorite} 
-              onChange={toggleAutoFavorite} 
-              style={{ width: '1.1rem', height: '1.1rem', accentColor: 'var(--primary-color)', cursor: 'pointer' }} 
-            />
-            Automatically favorite downloaded tones
-          </label>
         </div>
         <button onClick={selectDirectory} className="search-button" style={{ background: dirHandle ? 'transparent' : 'var(--primary-color)', color: dirHandle ? 'var(--primary-color)' : '#000', border: dirHandle ? '1px solid var(--primary-color)' : 'none', fontSize: '1.1rem', padding: '1rem 2rem', borderRadius: '8px' }}>
           {dirHandle ? 'Change Folder' : 'Select Local Folder'}
@@ -585,11 +592,11 @@ export default function Home() {
           {[
               { id: '', label: 'All', icon: <Grid size={16} /> },
               { id: 'amp-cab', label: 'Amp + Cab', icon: <Server size={16} /> },
-              { id: 'amp-head', label: 'Amp Head', icon: <Box size={16} /> },
-              { id: 'cabinet', label: 'Cabinet', icon: <Activity size={16} /> },
+              { id: 'amp', label: 'Amp Head', icon: <Box size={16} /> },
+              { id: 'cab', label: 'Cabinet', icon: <Activity size={16} /> },
               { id: 'pedal', label: 'Pedal', icon: <Sliders size={16} /> },
               { id: 'outboard', label: 'Outboard', icon: <Radio size={16} /> },
-              { id: 'spaces', label: 'Spaces', icon: <Box size={16} /> },
+              { id: 'space', label: 'Spaces', icon: <Box size={16} /> },
               { id: 'experimental', label: 'Experimental', icon: <Activity size={16} /> }
             ].map(cat => (
             <button
@@ -646,7 +653,7 @@ export default function Home() {
 
       <div className="models-list">
         {results.map(tone => {
-          const isDownloaded = downloadHistory.some(t => t.id === tone.id);
+          const isDownloaded = downloadedIds.has(tone.id);
           const isFavorited = favoriteIds.has(tone.id);
           const image = tone.images && tone.images.length > 0 ? tone.images[0] : null;
           const fsSupported = typeof window !== 'undefined' && 'showDirectoryPicker' in window;
@@ -678,7 +685,7 @@ export default function Home() {
                   <div className={`stat-item stat-action ${isFavorited ? 'active' : ''}`} onClick={() => toggleFavorite(tone)}>
                     <Bookmark size={16} fill={isFavorited ? 'currentColor' : 'none'} /> {tone.favorites_count}
                   </div>
-                  <div className="stat-item"><Folder size={16} /> {tone.models_count}</div>
+                  <div className="stat-item"><Folder size={16} /> {activeArchitecture === '2' ? (tone.a2_models_count || tone.models_count) : tone.models_count}</div>
                 </div>
 
                 <div className="model-author-row" style={{ marginTop: 0 }}>
@@ -725,7 +732,7 @@ export default function Home() {
         })}
       </div>
 
-      {totalPages > 1 && activeTab !== 'downloads' && (
+      {totalPages > 1 && (
         <div className="pagination-controls" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '1rem', marginTop: '3rem' }}>
           <button className="action-btn" disabled={currentPage === 1 || isSearching} onClick={() => setCurrentPage(p => Math.max(1, p - 1))}>Previous</button>
           <span style={{ fontSize: '0.9rem' }}>Page {currentPage} of {totalPages}</span>

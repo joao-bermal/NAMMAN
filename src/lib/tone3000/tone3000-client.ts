@@ -530,11 +530,38 @@ const STORAGE_KEY = 't3k_tokens';
  */
 export class T3KClient {
   private refreshPromise: Promise<T3KTokens> | null = null;
+  private lastRequestTime = 0;
+  private requestQueue: (() => void)[] = [];
+  private isProcessingQueue = false;
 
   constructor(
     private readonly publishableKey: string,
     private readonly onAuthRequired: () => void
   ) {}
+
+  private async enqueueRequest(): Promise<void> {
+    return new Promise(resolve => {
+      this.requestQueue.push(resolve);
+      this.processQueue();
+    });
+  }
+
+  private async processQueue() {
+    if (this.isProcessingQueue) return;
+    this.isProcessingQueue = true;
+
+    while (this.requestQueue.length > 0) {
+      const now = Date.now();
+      const timeSinceLast = now - this.lastRequestTime;
+      if (timeSinceLast < 250) { // Max 4 requests per second
+        await new Promise(r => setTimeout(r, 250 - timeSinceLast));
+      }
+      this.lastRequestTime = Date.now();
+      const resolve = this.requestQueue.shift();
+      if (resolve) resolve();
+    }
+    this.isProcessingQueue = false;
+  }
 
   setTokens(tokens: T3KTokens): void {
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(tokens));
@@ -594,13 +621,43 @@ export class T3KClient {
 
     while (retries >= 0) {
       const token = await this.getAccessToken();
-      res = await globalThis.fetch(resolve(path), {
-        ...init,
-        headers: { ...init?.headers, Authorization: `Bearer ${token}` },
-      });
+      
+      let isNetworkError = false;
+      try {
+        await this.enqueueRequest();
+        res = await globalThis.fetch(resolve(path), {
+          ...init,
+          headers: { ...init?.headers, Authorization: `Bearer ${token}` },
+        });
+      } catch (err) {
+        if (err instanceof TypeError && retries > 0) {
+          isNetworkError = true;
+        } else {
+          throw err;
+        }
+      }
 
-      // Retry once on 401 — handles expiry race conditions between refresh check and request
-      if (res.status === 401) {
+      // Handle CORS network errors (caused by Vercel 429 dropping CORS headers) or 429 status
+      if (isNetworkError || (res && res.status === 429)) {
+        if (retries > 0) {
+          retries--;
+          let waitMs = delay;
+          if (res && res.status === 429) {
+            const retryAfter = res.headers.get('Retry-After');
+            if (retryAfter) {
+              const parsed = parseInt(retryAfter, 10);
+              if (!isNaN(parsed)) waitMs = Math.max(delay, parsed * 1000);
+            }
+          }
+          console.warn(`[T3KClient] Network or Rate Limit error. Retrying in ${waitMs}ms...`);
+          await new Promise(r => setTimeout(r, waitMs));
+          delay *= 2; // exponential backoff
+          continue;
+        }
+      }
+
+      // Retry once on 401 - handles expiry race conditions between refresh check and request
+      if (res && res.status === 401) {
         const stored = this.getTokens();
         if (stored) {
           this.setTokens({ ...stored, expires_at: 0 }); // force a refresh on next call
@@ -610,21 +667,6 @@ export class T3KClient {
             headers: { ...init?.headers, Authorization: `Bearer ${retryToken}` },
           });
         }
-      }
-
-      // Handle rate limits automatically
-      if (res.status === 429 && retries > 0) {
-        retries--;
-        let waitMs = delay;
-        const retryAfter = res.headers.get('Retry-After');
-        if (retryAfter) {
-          const parsed = parseInt(retryAfter, 10);
-          if (!isNaN(parsed)) waitMs = Math.max(delay, parsed * 1000);
-        }
-        console.warn(`[T3KClient] Rate limited (429). Retrying in ${waitMs}ms...`);
-        await new Promise(r => setTimeout(r, waitMs));
-        delay *= 2; // exponential backoff
-        continue;
       }
 
       break;
@@ -674,13 +716,27 @@ export class T3KClient {
     return res.json();
   }
 
-  /** Get tones created by the authenticated user. */
+  /** Get tones created by the authenticated user (or another user's public tones by username). */
   async listCreatedTones(params?: ListCreatedTonesParams): Promise<PaginatedResponse<Tone>> {
     const qs = new URLSearchParams();
     if (params?.page) qs.set('page', String(params.page));
     if (params?.pageSize) qs.set('page_size', String(params.pageSize));
+    if (params?.username) qs.set('username', params.username);
     const res = await this.fetch(`/api/v1/tones/created?${qs}`);
     if (!res.ok) throw new Error(`listCreatedTones failed: ${res.status}`);
+    return res.json();
+  }
+
+  /** Browse any public user's tones by their username. */
+  async listUserTones(username: string, params?: { page?: number; pageSize?: number }): Promise<PaginatedResponse<Tone>> {
+    // First try the created endpoint with username filter
+    // Falls back to searchTones filtered by query if not supported
+    const qs = new URLSearchParams();
+    if (params?.page) qs.set('page', String(params.page));
+    if (params?.pageSize) qs.set('page_size', String(params.pageSize));
+    qs.set('username', username);
+    const res = await this.fetch(`/api/v1/tones/created?${qs}`);
+    if (!res.ok) throw new Error(`listUserTones failed: ${res.status}`);
     return res.json();
   }
 
@@ -752,5 +808,43 @@ export class T3KClient {
     const a = Object.assign(document.createElement('a'), { href: url, download: filename });
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  /** Get tones downloaded by the authenticated user. */
+  async listDownloadedTones(params?: { page?: number; pageSize?: number }): Promise<PaginatedResponse<Tone>> {
+    const qs = new URLSearchParams();
+    if (params?.page) qs.set('page', String(params.page));
+    if (params?.pageSize) qs.set('page_size', String(params.pageSize));
+    const res = await this.fetch(`/api/v1/tones/downloaded?${qs}`);
+    if (!res.ok) throw new Error(`listDownloadedTones failed: ${res.status}`);
+    return res.json();
+  }
+
+  /** Track a download for a specific tone. */
+  async trackDownload(toneId: number): Promise<void> {
+    await this.enqueueRequest();
+    const token = await this.getAccessToken();
+    await globalThis.fetch(`/api/track`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ toneId, token })
+    });
+  }
+
+  /** Bypass Vercel WAF completely and download directly from Supabase Storage. */
+  async directDownload(modelUrl: string): Promise<Response> {
+    // Extract filename from Tone3000 API URL:
+    // e.g., https://www.tone3000.com/api/v1/models/556392/download/msimdehcfub.nam
+    const parts = modelUrl.split('/download/');
+    if (parts.length < 2) throw new Error("Invalid model URL format");
+    const filename = parts[1].split('?')[0]; // remove any query params
+
+    const supabaseUrl = `https://api.tone3000.com/storage/v1/object/public/models/${filename}`;
+    
+    // Fetch directly from Supabase (bypasses CORS since it's a public bucket with `*` origin)
+    // No queue, no rate limits, completely parallel!
+    const res = await globalThis.fetch(supabaseUrl);
+    if (!res.ok) throw new Error(`Direct download failed: ${res.status}`);
+    return res;
   }
 }

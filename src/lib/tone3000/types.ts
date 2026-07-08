@@ -166,6 +166,12 @@ export interface ListModelsParams {
 export interface ListCreatedTonesParams {
   page?: number;
   pageSize?: number;
+  username?: string; // Filter by a specific user's public tones
+}
+
+export interface ListUserTonesParams {
+  page?: number;
+  pageSize?: number;
 }
 
 export interface ListFavoritedTonesParams {
