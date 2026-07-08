@@ -728,7 +728,7 @@ export class T3KClient {
   }
 
   /** Browse any public user's tones by their username. */
-  async listUserTones(username: string, params?: { page?: number; pageSize?: number }): Promise<PaginatedResponse<Tone>> {
+  async listUserTones(username: string, params?: { page?: number; pageSize?: number; architecture?: '2' | 'all' }): Promise<PaginatedResponse<Tone>> {
     const page = params?.page ?? 1;
     const pageSize = params?.pageSize ?? 15;
     const token = await this.getAccessToken();
@@ -744,7 +744,7 @@ export class T3KClient {
       is_calibrated: false,
       size_filters: null,
       usernames: [username],
-      architecture_filter: null
+      architecture_filter: params?.architecture === '2' ? '2' : null
     };
 
     const res = await globalThis.fetch("https://api.tone3000.com/rest/v1/rpc/search_tones_a2", {
@@ -884,10 +884,17 @@ export class T3KClient {
 
     const supabaseUrl = `https://api.tone3000.com/storage/v1/object/public/models/${filename}`;
     
-    // Fetch directly from Supabase (bypasses CORS since it's a public bucket with `*` origin)
-    // No queue, no rate limits, completely parallel!
-    const res = await globalThis.fetch(supabaseUrl);
-    if (!res.ok) throw new Error(`Direct download failed: ${res.status}`);
-    return res;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 seconds timeout
+
+    try {
+      const res = await globalThis.fetch(supabaseUrl, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (!res.ok) throw new Error(`Direct download failed: ${res.status}`);
+      return res;
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      throw err;
+    }
   }
 }

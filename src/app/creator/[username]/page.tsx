@@ -1,11 +1,12 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
   DownloadCloud, CheckCircle, Bookmark, Folder, ExternalLink,
   ArrowLeft, Users, Download, X, ChevronLeft, ChevronRight,
-  Layers, CheckSquare, Square
+  Layers, CheckSquare, Square, Search, Grid, Server, Box,
+  Activity, Sliders, Radio
 } from 'lucide-react';
 
 import { PUBLISHABLE_KEY, getRedirectUri } from '@/lib/tone3000/config';
@@ -15,6 +16,27 @@ import { Gear, TonesSort, type Tone, type Model, type ArchitectureVersion } from
 const client = new T3KClient(PUBLISHABLE_KEY, () => {
   if (typeof window !== 'undefined') startStandardFlow(PUBLISHABLE_KEY, getRedirectUri());
 });
+
+const CATEGORIES = [
+  { id: '', label: 'All', icon: <Grid size={16} /> },
+  { id: 'amp-cab', label: 'Amp + Cab', icon: <Server size={16} /> },
+  { id: 'amp', label: 'Amp Head', icon: <Box size={16} /> },
+  { id: 'cab', label: 'Cabinet', icon: <Activity size={16} /> },
+  { id: 'pedal', label: 'Pedal', icon: <Sliders size={16} /> },
+  { id: 'outboard', label: 'Outboard', icon: <Radio size={16} /> },
+  { id: 'spaces', label: 'Spaces', icon: <Box size={16} /> },
+  { id: 'experimental', label: 'Experimental', icon: <Activity size={16} /> },
+];
+
+const gearLabel = (tone: Tone): string => {
+  const g = tone.gear?.toLowerCase() || 'unknown';
+
+  if (g === 'full-rig' || g === 'amp-cab' || g === 'amp_cab' || g === 'amp+cab') return 'Amp + Cab';
+  if (g === 'amp' || g === 'amp-head' || g === 'amp_head') return 'Amp Head';
+  if (g === 'pedal') return 'Pedal';
+  if (g === 'ir' || g === 'cabinet' || g === 'cab') return 'Cabinet / IR';
+  return tone.gear || 'Other';
+};
 
 const PAGE_SIZE = 15;
 
@@ -30,7 +52,7 @@ function timeAgo(dateString: string) {
   return `${months} month${months > 1 ? 's' : ''} ago`;
 }
 
-type BulkItem = { id: number; title: string; status: 'pending' | 'syncing' | 'done' | 'error'; error?: string };
+type BulkItem = { id: number; title: string; status: 'pending' | 'syncing' | 'done' | 'error'; tone?: Tone };
 
 export default function CreatorPage() {
   const params = useParams();
@@ -38,11 +60,86 @@ export default function CreatorPage() {
   const username = params.username as string;
 
   const [connected, setConnected] = useState<boolean | null>(null);
-  const [tones, setTones] = useState<Tone[]>([]);
+  const [allTones, setAllTones] = useState<Tone[]>([]);
   const [currentPage, setCurrentPage] = useState(1);
-  const [totalPages, setTotalPages] = useState(1);
   const [totalTones, setTotalTones] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
+
+  // Local Filter States
+  const [activeCategory, setActiveCategory] = useState('');
+  const [activeArchitecture, setActiveArchitecture] = useState('2');
+  const [sortBy, setSortBy] = useState('newest');
+  const [query, setQuery] = useState('');
+
+  const filteredTones = useMemo(() => {
+    let list = [...allTones];
+
+    // Local Search Query filter
+    if (query.trim()) {
+      const q = query.toLowerCase();
+      list = list.filter(t => 
+        t.title.toLowerCase().includes(q) || 
+        (t.description && t.description.toLowerCase().includes(q))
+      );
+    }
+
+    // Category filter
+    if (activeCategory) {
+      list = list.filter(t => {
+        const g = t.gear?.toLowerCase() || '';
+        if (activeCategory === 'amp-cab') {
+          return g === 'amp-cab' || g === 'full-rig' || g === 'amp_cab' || g === 'amp+cab';
+        }
+        if (activeCategory === 'amp') {
+          return g === 'amp' || g === 'amp-head' || g === 'amp_head';
+        }
+        if (activeCategory === 'cab') {
+          return g === 'cab' || g === 'cabinet' || g === 'ir';
+        }
+        return g === activeCategory;
+      });
+    }
+
+    // Architecture filter
+    if (activeArchitecture) {
+      list = list.filter(t => {
+        if (activeArchitecture === '2') return (t.a2_models_count ?? 0) > 0;
+        if (activeArchitecture === '1') return (t.a1_models_count ?? 0) > 0;
+        if (activeArchitecture === 'custom') return (t.custom_models_count ?? 0) > 0;
+        return true;
+      });
+    }
+
+    // Sorting
+    list.sort((a, b) => {
+      if (sortBy === 'newest') {
+        const dateA = new Date((a as any).published_at || a.created_at || 0).getTime();
+        const dateB = new Date((b as any).published_at || b.created_at || 0).getTime();
+        return dateB - dateA;
+      }
+      if (sortBy === 'oldest') {
+        const dateA = new Date((a as any).published_at || a.created_at || 0).getTime();
+        const dateB = new Date((b as any).published_at || b.created_at || 0).getTime();
+        return dateA - dateB;
+      }
+      if (sortBy === 'downloads') {
+        return b.downloads_count - a.downloads_count;
+      }
+      if (sortBy === 'trending') {
+        return b.favorites_count - a.favorites_count;
+      }
+      return 0;
+    });
+
+    return list;
+  }, [allTones, query, activeCategory, activeArchitecture, sortBy]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredTones.length / PAGE_SIZE));
+
+  const tones = useMemo(() => {
+    const startIndex = (currentPage - 1) * PAGE_SIZE;
+    return filteredTones.slice(startIndex, startIndex + PAGE_SIZE);
+  }, [filteredTones, currentPage]);
 
   const [downloadedIds, setDownloadedIds] = useState<Set<number>>(new Set());
   const [downloadingItems, setDownloadingItems] = useState<Set<number>>(new Set());
@@ -54,8 +151,54 @@ export default function CreatorPage() {
 
   // Bulk progress panel
   const [bulkItems, setBulkItems] = useState<BulkItem[]>([]);
+  const [bulkStatus, setBulkStatus] = useState<'idle' | 'running' | 'paused'>('idle');
   const [isPanelOpen, setIsPanelOpen] = useState(false);
   const [dirHandle, setDirHandle] = useState<FileSystemDirectoryHandle | null>(null);
+
+  const bulkStatusRef = useRef(bulkStatus);
+  const bulkItemsRef = useRef<BulkItem[]>([]);
+
+  useEffect(() => {
+    bulkStatusRef.current = bulkStatus;
+  }, [bulkStatus]);
+
+  // Load saved bulk progress from localStorage
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const saved = localStorage.getItem('namman_bulk_download_creator_' + username);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && Array.isArray(parsed.items) && parsed.items.length > 0) {
+          setBulkItems(parsed.items);
+          bulkItemsRef.current = parsed.items;
+          setBulkStatus('paused'); // Always restore as paused
+          setIsPanelOpen(true);
+        }
+      }
+    } catch (e) {
+      console.error('Failed to load saved bulk progress:', e);
+    }
+  }, [username]);
+
+  // Save bulk progress to localStorage
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const key = 'namman_bulk_download_creator_' + username;
+    if (bulkItems.length === 0 || bulkStatus === 'idle') {
+      localStorage.removeItem(key);
+    } else {
+      const serializedItems = bulkItems.map(item => ({
+        id: item.id,
+        title: item.title,
+        status: item.status === 'syncing' ? 'pending' : item.status
+      }));
+      localStorage.setItem(key, JSON.stringify({
+        status: bulkStatus === 'running' ? 'paused' : bulkStatus,
+        items: serializedItems
+      }));
+    }
+  }, [username, bulkStatus, bulkItems]);
 
   // Toast
   const [toasts, setToasts] = useState<{ id: string; message: string; type: string }[]>([]);
@@ -106,13 +249,27 @@ export default function CreatorPage() {
   }, []);
 
   // Fetch tones for this creator
-  const fetchTones = useCallback(async (page: number) => {
+  const fetchTones = useCallback(async () => {
     setIsLoading(true);
     try {
-      const res = await client.listUserTones(username, { page, pageSize: PAGE_SIZE });
-      setTones(res.data);
-      setTotalPages(res.total_pages || 1);
-      setTotalTones(res.total || 0);
+      const [resA2, resAll] = await Promise.all([
+        client.listUserTones(username, { page: 1, pageSize: 1000, architecture: '2' }),
+        client.listUserTones(username, { page: 1, pageSize: 1000, architecture: 'all' })
+      ]);
+
+      const mergedMap = new Map<number, Tone>();
+      resAll.data.forEach(t => mergedMap.set(t.id, t));
+      resA2.data.forEach(t => mergedMap.set(t.id, t));
+
+      const mergedList = Array.from(mergedMap.values());
+      mergedList.sort((a, b) => {
+        const dateA = new Date((a as any).published_at || a.created_at || 0).getTime();
+        const dateB = new Date((b as any).published_at || b.created_at || 0).getTime();
+        return dateB - dateA;
+      });
+
+      setAllTones(mergedList);
+      setTotalTones(mergedList.length);
     } catch (err: any) {
       addToast(`Failed to load tones for ${username}: ${err.message}`, 'error');
     } finally {
@@ -121,8 +278,8 @@ export default function CreatorPage() {
   }, [username, addToast]);
 
   useEffect(() => {
-    if (connected) fetchTones(currentPage);
-  }, [connected, currentPage, fetchTones]);
+    if (connected) fetchTones();
+  }, [connected, fetchTones]);
 
   // Load dir handle
   useEffect(() => {
@@ -213,54 +370,105 @@ export default function CreatorPage() {
     processSyncQueue();
   };
 
-  const handleBulkDownload = async (ids: number[]) => {
-    const tonesMap = new Map(tones.map(t => [t.id, t]));
-    const items: BulkItem[] = ids.map(id => ({
-      id, title: tonesMap.get(id)?.title ?? `Tone #${id}`, status: 'pending'
-    }));
-    setBulkItems(items);
-    setIsPanelOpen(true);
-    setSelectionMode(false);
-    setSelectedIds(new Set());
+  const runBulkLoop = async () => {
+    if (bulkStatusRef.current !== 'running') return;
 
-    for (const item of items) {
-      setBulkItems(prev => prev.map(i => i.id === item.id ? { ...i, status: 'syncing' } : i));
-      const tone = tonesMap.get(item.id);
-      if (!tone) continue;
+    const items = bulkItemsRef.current;
+    const nextIndex = items.findIndex(item => item.status === 'pending');
+    if (nextIndex === -1) {
+      setBulkStatus('idle');
+      return;
+    }
 
-      setDownloadingItems(prev => new Set(prev).add(item.id));
-      try {
-        await doDownload(tone);
-        setBulkItems(prev => prev.map(i => i.id === item.id ? { ...i, status: 'done' } : i));
-      } catch {
-        setBulkItems(prev => prev.map(i => i.id === item.id ? { ...i, status: 'error' } : i));
+    const item = items[nextIndex];
+    
+    // Update status to syncing
+    item.status = 'syncing';
+    setBulkItems([...items]);
+
+    setDownloadingItems(prev => new Set(prev).add(item.id));
+
+    try {
+      let tone = item.tone;
+      if (!tone) {
+        tone = await client.getTone(item.id);
+        if (tone) {
+          item.title = tone.title;
+          item.tone = tone;
+          setBulkItems([...items]);
+        }
       }
-      // Cooldown between bulk jobs to respect Vercel WAF
-      if (ids.indexOf(item.id) < ids.length - 1) {
-        await new Promise(r => setTimeout(r, 3000));
+
+      if (tone) {
+        await doDownload(tone);
+        item.status = 'done';
+      } else {
+        throw new Error('Tone not found');
+      }
+    } catch (err) {
+      console.error(`Bulk download failed for id ${item.id}:`, err);
+      item.status = 'error';
+    } finally {
+      setDownloadingItems(prev => {
+        const n = new Set(prev);
+        n.delete(item.id);
+        return n;
+      });
+
+      setBulkItems([...items]);
+
+      // Wait 3s cooldown before next item
+      if (bulkStatusRef.current === 'running') {
+        setTimeout(() => runBulkLoop(), 3000);
       }
     }
   };
 
+  const handleBulkDownload = async (tonesOrIds: (number | Tone)[]) => {
+    const tonesMap = new Map(allTones.map(t => [t.id, t]));
+    const initialItems: BulkItem[] = tonesOrIds.map(x => {
+      const id = typeof x === 'number' ? x : x.id;
+      const title = typeof x === 'number' ? tonesMap.get(id)?.title : x.title;
+      const tone = typeof x === 'number' ? tonesMap.get(id) : x;
+      return {
+        id,
+        title: title ?? `Tone #${id}`,
+        status: 'pending' as const,
+        tone
+      };
+    });
+
+    bulkItemsRef.current = initialItems;
+    setBulkItems(initialItems);
+    setBulkStatus('running');
+    setIsPanelOpen(true);
+    setSelectionMode(false);
+    setSelectedIds(new Set());
+
+    // Start loop
+    setTimeout(() => runBulkLoop(), 0);
+  };
+
+  const handlePauseBulk = () => {
+    setBulkStatus('paused');
+  };
+
+  const handleResumeBulk = () => {
+    setBulkStatus('running');
+    bulkStatusRef.current = 'running';
+    setTimeout(() => runBulkLoop(), 0);
+  };
+
+  const handleCancelBulk = () => {
+    setBulkStatus('idle');
+    bulkStatusRef.current = 'idle';
+    setBulkItems([]);
+    bulkItemsRef.current = [];
+    setIsPanelOpen(false);
+  };
+
   const handleDownloadAll = async () => {
-    // Collect all tone IDs across all pages
-    setIsLoading(true);
-    addToast('Collecting all tones from this creator...', 'info');
-    try {
-      const allToneIds: number[] = [];
-      let page = 1, pages = 1;
-      do {
-        const res = await client.listUserTones(username, { page, pageSize: 100 });
-        res.data.forEach(t => allToneIds.push(t.id));
-        pages = res.total_pages || 1;
-        page++;
-      } while (page <= pages);
-      setIsLoading(false);
-      await handleBulkDownload(allToneIds);
-    } catch (err: any) {
-      setIsLoading(false);
-      addToast(`Failed to collect tones: ${err.message}`, 'error');
-    }
+    await handleBulkDownload(filteredTones);
   };
 
   const toggleSelectTone = (id: number) => {
@@ -334,10 +542,63 @@ export default function CreatorPage() {
             <button
               className="action-btn"
               onClick={handleDownloadAll}
-              style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: 'var(--primary-color)', color: '#000', border: 'none' }}
+              disabled={filteredTones.length === 0}
+              style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: 'var(--primary-color)', color: '#000', border: 'none', opacity: filteredTones.length === 0 ? 0.6 : 1, cursor: filteredTones.length === 0 ? 'not-allowed' : 'pointer' }}
             >
-              <Download size={16} /> Download All ({totalTones})
+              <Download size={16} /> Download All ({filteredTones.length})
             </button>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ marginBottom: '3rem' }}>
+        <h2 style={{ fontSize: '1.8rem', marginBottom: '1.5rem', color: '#fff' }}>Explore Creator's Tones</h2>
+        
+        <div style={{ display: 'flex', gap: '0.8rem', flexWrap: 'wrap', marginBottom: '2rem' }}>
+          {CATEGORIES.map(cat => (
+            <button
+              key={cat.id || 'all'}
+              className={`filter-btn ${activeCategory === cat.id ? 'active' : ''}`}
+              style={{ borderRadius: '50px', padding: '0.6rem 1.2rem', display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem' }}
+              onClick={() => { setActiveCategory(cat.id); setCurrentPage(1); }}
+            >
+              {cat.icon} {cat.label}
+            </button>
+          ))}
+        </div>
+
+        <form onSubmit={e => e.preventDefault()} style={{ marginBottom: '2rem', display: 'flex', gap: '1rem' }}>
+          <div style={{ flex: 1, position: 'relative' }}>
+            <Search size={20} color="var(--text-muted)" style={{ position: 'absolute', left: '1rem', top: '50%', transform: 'translateY(-50%)' }} />
+            <input
+              type="text"
+              className="search-input"
+              placeholder="Search creator's tones..."
+              value={query}
+              onChange={e => { setQuery(e.target.value); setCurrentPage(1); }}
+              style={{ width: '100%', padding: '1rem 1rem 1rem 3rem', borderRadius: '50px', fontSize: '1.1rem', background: 'var(--bg-color)' }}
+            />
+          </div>
+          <button type="submit" className="search-button" style={{ borderRadius: '50px', padding: '0 2rem' }}>
+            Search
+          </button>
+        </form>
+
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', borderTop: '1px solid var(--surface-border)', paddingTop: '1.5rem' }}>
+          <h3 style={{ fontSize: '1.3rem', margin: 0, color: '#fff' }}>Refine Your Search</h3>
+          <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+            <select className="sort-select" value={activeArchitecture} onChange={e => { setActiveArchitecture(e.target.value); setCurrentPage(1); }}>
+              <option value="">All Versions</option>
+              <option value="2">NAM A2 Only</option>
+              <option value="1">NAM A1 (Legacy) Only</option>
+              <option value="custom">Custom</option>
+            </select>
+            <select className="sort-select" value={sortBy} onChange={e => { setSortBy(e.target.value); setCurrentPage(1); }}>
+              <option value="trending">Trending</option>
+              <option value="newest">Newest</option>
+              <option value="oldest">Oldest</option>
+              <option value="downloads">Most Downloaded</option>
+            </select>
           </div>
         </div>
       </div>
@@ -404,7 +665,7 @@ export default function CreatorPage() {
                     </a>
                   </h3>
                   <div className="model-gear" style={{ fontSize: '0.85rem', marginBottom: '0.4rem' }}>
-                    {tone.gear}
+                    {gearLabel(tone)}
                     {(tone.a2_models_count ?? 0) > 0 && <span className="badge">NAM A2</span>}
                     {(tone.a1_models_count ?? 0) > 0 && <span className="badge">NAM A1</span>}
                   </div>
@@ -489,7 +750,9 @@ export default function CreatorPage() {
         }}>
           <div style={{ padding: '1.5rem', borderBottom: '1px solid var(--surface-border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div>
-              <h3 style={{ margin: 0, fontSize: '1.1rem' }}>Bulk Download</h3>
+              <h3 style={{ margin: 0, fontSize: '1.1rem', color: '#fff' }}>
+                Bulk Download {bulkStatus === 'paused' ? '(Paused)' : bulkStatus === 'running' ? '(Running)' : ''}
+              </h3>
               <p style={{ margin: '0.3rem 0 0', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
                 {bulkDone} / {bulkItems.length} completed {bulkErrors > 0 && `· ${bulkErrors} errors`}
               </p>
@@ -505,6 +768,35 @@ export default function CreatorPage() {
               <div style={{ height: '100%', width: `${bulkProgress}%`, background: 'var(--primary-color)', transition: 'width 0.4s ease', borderRadius: '3px' }} />
             </div>
             <p style={{ margin: '0.4rem 0 0', fontSize: '0.8rem', color: 'var(--text-muted)', textAlign: 'right' }}>{bulkProgress}%</p>
+          </div>
+
+          {/* Controls */}
+          <div style={{ padding: '0.8rem 1.5rem', display: 'flex', gap: '0.5rem', borderBottom: '1px solid var(--surface-border)', background: 'rgba(255,255,255,0.02)' }}>
+            {bulkStatus === 'running' ? (
+              <button
+                className="action-btn"
+                onClick={handlePauseBulk}
+                style={{ flex: 1, padding: '0.5rem', fontSize: '0.85rem', borderColor: '#facc15', color: '#facc15', background: 'transparent' }}
+              >
+                Pause
+              </button>
+            ) : (
+              <button
+                className="action-btn"
+                onClick={handleResumeBulk}
+                disabled={bulkItems.every(i => i.status !== 'pending')}
+                style={{ flex: 1, padding: '0.5rem', fontSize: '0.85rem', borderColor: '#10b981', color: '#10b981', background: 'transparent', opacity: bulkItems.every(i => i.status !== 'pending') ? 0.5 : 1 }}
+              >
+                Resume
+              </button>
+            )}
+            <button
+              className="action-btn"
+              onClick={handleCancelBulk}
+              style={{ flex: 1, padding: '0.5rem', fontSize: '0.85rem', borderColor: '#ef4444', color: '#ef4444', background: 'transparent' }}
+            >
+              Cancel
+            </button>
           </div>
 
           {/* Item list */}

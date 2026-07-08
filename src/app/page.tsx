@@ -131,9 +131,54 @@ export default function Home() {
   // ── Bulk selection + progress panel ───────────────────────────────────────
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
-  type BulkItem = { id: number; title: string; status: 'pending'|'syncing'|'done'|'error' };
+  type BulkItem = { id: number; title: string; status: 'pending'|'syncing'|'done'|'error'; tone?: Tone };
   const [bulkItems, setBulkItems] = useState<BulkItem[]>([]);
+  const [bulkStatus, setBulkStatus] = useState<'idle' | 'running' | 'paused'>('idle');
   const [isBulkPanelOpen, setIsBulkPanelOpen] = useState(false);
+
+  const bulkStatusRef = useRef(bulkStatus);
+  const bulkItemsRef = useRef<BulkItem[]>([]);
+
+  useEffect(() => {
+    bulkStatusRef.current = bulkStatus;
+  }, [bulkStatus]);
+
+  // Load saved bulk progress from localStorage
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const saved = localStorage.getItem('namman_bulk_download_main');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && Array.isArray(parsed.items) && parsed.items.length > 0) {
+          setBulkItems(parsed.items);
+          bulkItemsRef.current = parsed.items;
+          setBulkStatus('paused'); // Always restore as paused
+          setIsBulkPanelOpen(true);
+        }
+      }
+    } catch (e) {
+      console.error('Failed to load saved bulk progress:', e);
+    }
+  }, []);
+
+  // Save bulk progress to localStorage
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (bulkItems.length === 0 || bulkStatus === 'idle') {
+      localStorage.removeItem('namman_bulk_download_main');
+    } else {
+      const serializedItems = bulkItems.map(item => ({
+        id: item.id,
+        title: item.title,
+        status: item.status === 'syncing' ? 'pending' : item.status
+      }));
+      localStorage.setItem('namman_bulk_download_main', JSON.stringify({
+        status: bulkStatus === 'running' ? 'paused' : bulkStatus,
+        items: serializedItems
+      }));
+    }
+  }, [bulkStatus, bulkItems]);
 
   // ── Global sync job queue (serializes API calls to avoid Vercel WAF blocks) ─
   const syncQueueRef = useRef<(() => Promise<void>)[]>([]);
@@ -504,72 +549,123 @@ export default function Home() {
     }
   };
 
-  const handleBulkDownload = async (ids: number[]) => {
+  const runBulkLoop = async () => {
+    if (bulkStatusRef.current !== 'running') return;
+
+    const items = bulkItemsRef.current;
+    const nextIndex = items.findIndex(item => item.status === 'pending');
+    if (nextIndex === -1) {
+      setBulkStatus('idle');
+      return;
+    }
+
+    const item = items[nextIndex];
+    
+    // Update status to syncing
+    item.status = 'syncing';
+    setBulkItems([...items]);
+
+    setDownloadingItems(prev => new Set(prev).add(item.id));
+
+    try {
+      let tone = item.tone;
+      if (!tone) {
+        tone = await client.getTone(item.id);
+        if (tone) {
+          item.title = tone.title;
+          item.tone = tone;
+          setBulkItems([...items]);
+        }
+      }
+
+      if (tone) {
+        await doDownload(tone);
+        item.status = 'done';
+      } else {
+        throw new Error('Tone not found');
+      }
+    } catch (err) {
+      console.error(`Bulk download failed for id ${item.id}:`, err);
+      item.status = 'error';
+    } finally {
+      setDownloadingItems(prev => {
+        const n = new Set(prev);
+        n.delete(item.id);
+        return n;
+      });
+
+      setBulkItems([...items]);
+
+      // Wait 3s cooldown before next item
+      if (bulkStatusRef.current === 'running') {
+        setTimeout(() => runBulkLoop(), 3000);
+      }
+    }
+  };
+
+  const handleBulkDownload = async (tonesOrIds: (number | Tone)[]) => {
     const resultsMap = new Map(results.map(t => [t.id, t]));
-    const initialItems = ids.map(id => ({
-      id,
-      title: resultsMap.get(id)?.title ?? `Tone #${id}`,
-      status: 'pending' as const
-    }));
+    const initialItems: BulkItem[] = tonesOrIds.map(x => {
+      const id = typeof x === 'number' ? x : x.id;
+      const title = typeof x === 'number' ? resultsMap.get(id)?.title : x.title;
+      const tone = typeof x === 'number' ? resultsMap.get(id) : x;
+      return {
+        id,
+        title: title ?? `Tone #${id}`,
+        status: 'pending' as const,
+        tone
+      };
+    });
+
+    bulkItemsRef.current = initialItems;
     setBulkItems(initialItems);
+    setBulkStatus('running');
     setIsBulkPanelOpen(true);
     setSelectionMode(false);
     setSelectedIds(new Set());
 
-    ids.forEach(id => {
-      syncQueueRef.current.push(async () => {
-        setBulkItems(prev => prev.map(item => item.id === id ? { ...item, status: 'syncing' } : item));
-        setDownloadingItems(prev => new Set(prev).add(id));
-        try {
-          let tone = resultsMap.get(id);
-          if (!tone) {
-            tone = await client.getTone(id);
-            if (tone) {
-              setBulkItems(prev => prev.map(item => item.id === id ? { ...item, title: tone!.title } : item));
-            }
-          }
-          if (tone) {
-            await doDownload(tone);
-            setBulkItems(prev => prev.map(item => item.id === id ? { ...item, status: 'done' } : item));
-          } else {
-            throw new Error('Tone not found');
-          }
-        } catch (err) {
-          console.error(`Bulk download failed for id ${id}:`, err);
-          setBulkItems(prev => prev.map(item => item.id === id ? { ...item, status: 'error' } : item));
-        } finally {
-          setDownloadingItems(prev => {
-            const n = new Set(prev);
-            n.delete(id);
-            return n;
-          });
-        }
-      });
-    });
+    // Start loop
+    setTimeout(() => runBulkLoop(), 0);
+  };
 
-    processSyncQueue();
+  const handlePauseBulk = () => {
+    setBulkStatus('paused');
+  };
+
+  const handleResumeBulk = () => {
+    setBulkStatus('running');
+    bulkStatusRef.current = 'running';
+    setTimeout(() => runBulkLoop(), 0);
+  };
+
+  const handleCancelBulk = () => {
+    setBulkStatus('idle');
+    bulkStatusRef.current = 'idle';
+    setBulkItems([]);
+    bulkItemsRef.current = [];
+    setIsBulkPanelOpen(false);
   };
 
   const handleDownloadAllMyDownloads = async () => {
     setIsSearching(true);
     addToast('Fetching your download history...', 'info');
     try {
-      const allIds: number[] = [];
+      const allTones: Tone[] = [];
       let page = 1;
       let pages = 1;
       do {
         const res = await client.listDownloadedTones({ page, pageSize: 100 });
-        res.data.forEach(t => allIds.push(t.id));
+        res.data.forEach(t => allTones.push(t));
         pages = res.total_pages || 1;
         page += 1;
       } while (page <= pages && page <= 20);
 
-      if (allIds.length === 0) {
+      if (allTones.length === 0) {
         addToast('No downloads to sync.', 'info');
         return;
       }
 
-      await handleBulkDownload(allIds);
+      await handleBulkDownload(allTones);
     } catch (err: any) {
       console.error(err);
       addToast(`Failed to fetch downloads: ${err.message}`, 'error');
@@ -951,7 +1047,9 @@ export default function Home() {
         }}>
           <div style={{ padding: '1.5rem', borderBottom: '1px solid var(--surface-border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div>
-              <h3 style={{ margin: 0, fontSize: '1.1rem', color: '#fff' }}>Bulk Download</h3>
+              <h3 style={{ margin: 0, fontSize: '1.1rem', color: '#fff' }}>
+                Bulk Download {bulkStatus === 'paused' ? '(Paused)' : bulkStatus === 'running' ? '(Running)' : ''}
+              </h3>
               <p style={{ margin: '0.3rem 0 0', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
                 {bulkItems.filter(i => i.status === 'done').length} / {bulkItems.length} completed
                 {bulkItems.filter(i => i.status === 'error').length > 0 && ` · ${bulkItems.filter(i => i.status === 'error').length} errors`}
@@ -974,6 +1072,35 @@ export default function Home() {
                 );
               })()}
             </div>
+          </div>
+
+          {/* Controls */}
+          <div style={{ padding: '0.8rem 1.5rem', display: 'flex', gap: '0.5rem', borderBottom: '1px solid var(--surface-border)', background: 'rgba(255,255,255,0.02)' }}>
+            {bulkStatus === 'running' ? (
+              <button
+                className="action-btn"
+                onClick={handlePauseBulk}
+                style={{ flex: 1, padding: '0.5rem', fontSize: '0.85rem', borderColor: '#facc15', color: '#facc15', background: 'transparent' }}
+              >
+                Pause
+              </button>
+            ) : (
+              <button
+                className="action-btn"
+                onClick={handleResumeBulk}
+                disabled={bulkItems.every(i => i.status !== 'pending')}
+                style={{ flex: 1, padding: '0.5rem', fontSize: '0.85rem', borderColor: '#10b981', color: '#10b981', background: 'transparent', opacity: bulkItems.every(i => i.status !== 'pending') ? 0.5 : 1 }}
+              >
+                Resume
+              </button>
+            )}
+            <button
+              className="action-btn"
+              onClick={handleCancelBulk}
+              style={{ flex: 1, padding: '0.5rem', fontSize: '0.85rem', borderColor: '#ef4444', color: '#ef4444', background: 'transparent' }}
+            >
+              Cancel
+            </button>
           </div>
 
           {/* Item list */}
