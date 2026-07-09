@@ -138,6 +138,20 @@ export default function Home() {
 
   const bulkStatusRef = useRef(bulkStatus);
   const bulkItemsRef = useRef<BulkItem[]>([]);
+  const bulkLoopActiveRef = useRef(false);
+
+  const handleRemoveBulkItem = useCallback((id: number) => {
+    setBulkItems(prev => {
+      const next = prev.filter(item => item.id !== id);
+      bulkItemsRef.current = next;
+      if (next.length === 0) {
+        setBulkStatus('idle');
+        bulkStatusRef.current = 'idle';
+        setIsBulkPanelOpen(false);
+      }
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     bulkStatusRef.current = bulkStatus;
@@ -551,50 +565,56 @@ export default function Home() {
 
   const runBulkLoop = async () => {
     if (bulkStatusRef.current !== 'running') return;
+    if (bulkLoopActiveRef.current) return;
 
-    const items = bulkItemsRef.current;
-    const nextIndex = items.findIndex(item => item.status === 'pending');
-    if (nextIndex === -1) {
-      setBulkStatus('idle');
-      return;
-    }
-
-    const item = items[nextIndex];
-    
-    // Update status to syncing
-    item.status = 'syncing';
-    setBulkItems([...items]);
-
-    setDownloadingItems(prev => new Set(prev).add(item.id));
-
+    bulkLoopActiveRef.current = true;
     try {
-      let tone = item.tone;
-      if (!tone) {
-        tone = await client.getTone(item.id);
-        if (tone) {
-          item.title = tone.title;
-          item.tone = tone;
-          setBulkItems([...items]);
-        }
+      const items = bulkItemsRef.current;
+      const nextIndex = items.findIndex(item => item.status === 'pending');
+      if (nextIndex === -1) {
+        setBulkStatus('idle');
+        return;
       }
 
-      if (tone) {
-        await doDownload(tone);
-        item.status = 'done';
-      } else {
-        throw new Error('Tone not found');
-      }
-    } catch (err) {
-      console.error(`Bulk download failed for id ${item.id}:`, err);
-      item.status = 'error';
-    } finally {
-      setDownloadingItems(prev => {
-        const n = new Set(prev);
-        n.delete(item.id);
-        return n;
-      });
-
+      const item = items[nextIndex];
+      
+      // Update status to syncing
+      item.status = 'syncing';
       setBulkItems([...items]);
+
+      setDownloadingItems(prev => new Set(prev).add(item.id));
+
+      try {
+        let tone = item.tone;
+        if (!tone) {
+          tone = await client.getTone(item.id);
+          if (tone) {
+            item.title = tone.title;
+            item.tone = tone;
+            setBulkItems([...items]);
+          }
+        }
+
+        if (tone) {
+          await doDownload(tone);
+          item.status = 'done';
+        } else {
+          throw new Error('Tone not found');
+        }
+      } catch (err) {
+        console.error(`Bulk download failed for id ${item.id}:`, err);
+        item.status = 'error';
+      } finally {
+        setDownloadingItems(prev => {
+          const n = new Set(prev);
+          n.delete(item.id);
+          return n;
+        });
+
+        setBulkItems([...items]);
+      }
+    } finally {
+      bulkLoopActiveRef.current = false;
 
       // Wait 3s cooldown before next item
       if (bulkStatusRef.current === 'running') {
@@ -1116,6 +1136,24 @@ export default function Home() {
                 <span style={{ fontSize: '0.85rem', color: item.status === 'error' ? '#ef4444' : item.status === 'done' ? 'var(--text-muted)' : 'var(--text-primary)', flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                   {item.title}
                 </span>
+                {item.status !== 'syncing' && (
+                  <button
+                    onClick={() => handleRemoveBulkItem(item.id)}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: 'var(--text-muted)',
+                      cursor: 'pointer',
+                      padding: '0.2rem',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center'
+                    }}
+                    title="Remove from list"
+                  >
+                    <X size={14} />
+                  </button>
+                )}
               </div>
             ))}
           </div>
