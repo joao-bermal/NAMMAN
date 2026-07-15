@@ -38,6 +38,15 @@ const gearLabel = (tone: Tone): string => {
   return tone.gear || 'Other';
 };
 
+const toneHref = (tone: Tone): string => {
+  try {
+    const slug = new URL(tone.url).pathname.replace(/^\/+/, '').replace(/^tones\//, '');
+    return `https://www.tone3000.com/tones/${slug}`;
+  } catch {
+    return tone.url;
+  }
+};
+
 const PAGE_SIZE = 15;
 
 function timeAgo(dateString: string) {
@@ -343,17 +352,33 @@ export default function CreatorPage() {
       }
 
       const usedNames = new Set<string>();
+      const downloadedModelsInfo: any[] = [];
+
       for (const m of models) {
         try {
           if (!m.model_url) continue;
           const res = await client.directDownload(m.model_url);
           if (!res.ok) continue;
           const blob = await res.blob();
+
+          let internalMetadata: any = null;
+          let fileArchitecture: string | null = null;
+          try {
+            const text = await blob.text();
+            const parsed = JSON.parse(text);
+            internalMetadata = parsed.metadata || null;
+            fileArchitecture = parsed.architecture || null;
+          } catch {
+            // Not a JSON file (e.g. .wav / IR file)
+          }
+
           let base = (m.name || 'model').replace(/[^a-z0-9 _-]/gi, '_').trim() || 'model';
           if (usedNames.has(base)) { let j = 2; while (usedNames.has(`${base}_${j}`)) j++; base = `${base}_${j}`; }
           usedNames.add(base);
+
           const ext = (new URL(m.model_url).pathname.match(/\.([a-z0-9]+)$/i)?.[0] ?? '.nam').toLowerCase();
           const filename = base + ext;
+
           if (packHandle) {
             const fh = await packHandle.getFileHandle(filename, { create: true });
             const w = await fh.createWritable();
@@ -364,7 +389,46 @@ export default function CreatorPage() {
             const a = Object.assign(document.createElement('a'), { href: url, download: filename });
             document.body.appendChild(a); a.click(); a.remove();
           }
+
+          downloadedModelsInfo.push({
+            id: m.id,
+            name: m.name,
+            size: m.size,
+            architecture: m.architecture_version || '1',
+            filename: filename,
+            internal_metadata: internalMetadata,
+            internal_architecture: fileArchitecture
+          });
         } catch { /* swallow individual file error */ }
+      }
+
+      const metaObj = {
+        id: tone.id,
+        title: tone.title,
+        description: tone.description,
+        gear: tone.gear,
+        platform: tone.platform,
+        creator: tone.user?.username || 'unknown',
+        creator_id: tone.user_id,
+        url: toneHref(tone),
+        downloads_count: tone.downloads_count,
+        favorites_count: tone.favorites_count,
+        makes: tone.makes || [],
+        tags: tone.tags || [],
+        models: downloadedModelsInfo,
+        synced_at: new Date().toISOString()
+      };
+
+      if (packHandle) {
+        const metaFileHandle = await packHandle.getFileHandle('metadata.json', { create: true });
+        const metaWritable = await metaFileHandle.createWritable();
+        await metaWritable.write(JSON.stringify(metaObj, null, 2));
+        await metaWritable.close();
+      } else {
+        const metaBlob = new Blob([JSON.stringify(metaObj, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(metaBlob);
+        const a = Object.assign(document.createElement('a'), { href: url, download: 'metadata.json' });
+        document.body.appendChild(a); a.click(); a.remove();
       }
 
       await client.trackDownload(tone.id).catch(err => {

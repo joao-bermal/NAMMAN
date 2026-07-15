@@ -504,6 +504,7 @@ export default function Home() {
       }
 
       const usedNames = new Set<string>();
+      const downloadedModelsInfo: any[] = [];
 
       for (let i = 0; i < models.length; i++) {
         const m = models[i];
@@ -512,6 +513,17 @@ export default function Home() {
           const res = await client.directDownload(m.model_url);
           if (!res.ok) throw new Error(`Failed to download ${m.name} (${res.status})`);
           const blob = await res.blob();
+
+          let internalMetadata: any = null;
+          let fileArchitecture: string | null = null;
+          try {
+            const text = await blob.text();
+            const parsed = JSON.parse(text);
+            internalMetadata = parsed.metadata || null;
+            fileArchitecture = parsed.architecture || null;
+          } catch {
+            // Not a JSON file (e.g. .wav / IR file)
+          }
 
           let base = (m.name || 'model').replace(/[^a-z0-9 _-]/gi, '_').trim() || 'model';
           if (usedNames.has(base)) {
@@ -537,10 +549,52 @@ export default function Home() {
             a.click();
             a.remove();
           }
+
+          downloadedModelsInfo.push({
+            id: m.id,
+            name: m.name,
+            size: m.size,
+            architecture: m.architecture_version || '1',
+            filename: filename,
+            internal_metadata: internalMetadata,
+            internal_architecture: fileArchitecture
+          });
         } catch (err) {
           console.error(`Error downloading model ${m.name}:`, err);
           // Swallowing individual model error so the rest of the pack can sync
         }
+      }
+
+      const metaObj = {
+        id: tone.id,
+        title: tone.title,
+        description: tone.description,
+        gear: tone.gear,
+        platform: tone.platform,
+        creator: tone.user?.username || 'unknown',
+        creator_id: tone.user_id,
+        url: toneHref(tone),
+        downloads_count: tone.downloads_count,
+        favorites_count: tone.favorites_count,
+        makes: tone.makes || [],
+        tags: tone.tags || [],
+        models: downloadedModelsInfo,
+        synced_at: new Date().toISOString()
+      };
+
+      if (packHandle) {
+        const metaFileHandle = await packHandle.getFileHandle('metadata.json', { create: true });
+        const metaWritable = await metaFileHandle.createWritable();
+        await metaWritable.write(JSON.stringify(metaObj, null, 2));
+        await metaWritable.close();
+      } else {
+        // Fallback browser download of metadata.json
+        const metaBlob = new Blob([JSON.stringify(metaObj, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(metaBlob);
+        const a = Object.assign(document.createElement('a'), { href: url, download: 'metadata.json' });
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
       }
 
       await client.trackDownload(tone.id).catch(err => {
