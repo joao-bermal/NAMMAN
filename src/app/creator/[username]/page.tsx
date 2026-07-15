@@ -367,7 +367,10 @@ export default function CreatorPage() {
         } catch { /* swallow individual file error */ }
       }
 
-      await client.trackDownload(tone.id).catch(console.error);
+      await client.trackDownload(tone.id).catch(err => {
+        console.error('Tracking failed:', err);
+        addToast(`Synced "${tone.title}", but failed to register download: ${err.message || err}`, 'error');
+      });
       setDownloadedIds(prev => new Set(prev).add(tone.id));
       addToast(`Synced "${tone.title}" (${models.length} model${models.length > 1 ? 's' : ''}).`, 'success');
     } catch (err: any) {

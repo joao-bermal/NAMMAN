@@ -31,13 +31,14 @@ export async function POST(req: Request) {
       user: { id: userId }
     };
     const cookieValue = 'base64-' + Buffer.from(JSON.stringify(cookieObj)).toString('base64');
-    const cookieHeader = `sb-api-auth-token=${cookieValue}`;
+    const cookieHeader = `sb-api-auth-token=${cookieValue}; sb-gzybiuopxkdxybtnojds-auth-token=${cookieValue}`;
 
     // Request to Tone3000's actual downloads tracking API
     const res = await fetch('https://www.tone3000.com/api/downloads', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
         'Cookie': cookieHeader
       },
       body: JSON.stringify({

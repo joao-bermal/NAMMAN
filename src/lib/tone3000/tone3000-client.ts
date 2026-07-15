@@ -867,11 +867,15 @@ export class T3KClient {
   async trackDownload(toneId: number): Promise<void> {
     await this.enqueueRequest();
     const token = await this.getAccessToken();
-    await globalThis.fetch(`/api/track`, {
+    const res = await globalThis.fetch(`/api/track`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ toneId, token })
     });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Server responded with status ${res.status}`);
+    }
   }
 
   /** Bypass Vercel WAF completely and download directly from Supabase Storage. */

@@ -543,7 +543,10 @@ export default function Home() {
         }
       }
 
-      await client.trackDownload(tone.id).catch(console.error);
+      await client.trackDownload(tone.id).catch(err => {
+        console.error('Tracking failed:', err);
+        addToast(`Synced "${tone.title}", but failed to register download: ${err.message || err}`, 'error');
+      });
       addToast(`Synced "${tone.title}" (${models.length} model${models.length > 1 ? 's' : ''}).`, 'success');
     } catch (err: any) {
       console.error(err);
