@@ -41,6 +41,22 @@ const toneHref = (tone: Tone): string => {
   }
 };
 
+const verifyFolderPermission = async (handle: FileSystemDirectoryHandle): Promise<boolean> => {
+  try {
+    const opts = { mode: 'readwrite' as const };
+    if ((await (handle as any).queryPermission(opts)) === 'granted') {
+      return true;
+    }
+    if ((await (handle as any).requestPermission(opts)) === 'granted') {
+      return true;
+    }
+    return false;
+  } catch (e) {
+    console.error('Permission request failed:', e);
+    return false;
+  }
+};
+
 function timeAgo(dateString: string) {
   const diff = Date.now() - new Date(dateString).getTime();
   const days = Math.floor(diff / (1000 * 60 * 60 * 24));
@@ -441,7 +457,15 @@ export default function Home() {
     }
   };
 
-  const handleDownload = (tone: Tone) => {
+  const handleDownload = async (tone: Tone) => {
+    if (dirHandle) {
+      const hasPerm = await verifyFolderPermission(dirHandle);
+      if (!hasPerm) {
+        addToast('Write permission to the folder was denied.', 'error');
+        return;
+      }
+    }
+
     // Immediately show the tone as "syncing" so the UI is responsive
     setDownloadingItems(prev => new Set(prev).add(tone.id));
 
@@ -458,13 +482,6 @@ export default function Home() {
     }
 
     try {
-      if (dirHandle) {
-        const perm = await (dirHandle as DirectoryHandleWithPermissions).requestPermission({ mode: 'readwrite' });
-        if (perm !== 'granted') {
-          addToast('Write permission to the folder was denied.', 'error');
-          return;
-        }
-      }
 
       // Pull legacy (A1 + Custom) and A2 models, then merge — the API has no
       // single "all architectures" view.
@@ -681,6 +698,14 @@ export default function Home() {
   };
 
   const handleBulkDownload = async (tonesOrIds: (number | Tone)[]) => {
+    if (dirHandle) {
+      const hasPerm = await verifyFolderPermission(dirHandle);
+      if (!hasPerm) {
+        addToast('Write permission to the folder was denied.', 'error');
+        return;
+      }
+    }
+
     const resultsMap = new Map(results.map(t => [t.id, t]));
     const initialItems: BulkItem[] = tonesOrIds.map(x => {
       const id = typeof x === 'number' ? x : x.id;
@@ -709,7 +734,15 @@ export default function Home() {
     setBulkStatus('paused');
   };
 
-  const handleResumeBulk = () => {
+  const handleResumeBulk = async () => {
+    if (dirHandle) {
+      const hasPerm = await verifyFolderPermission(dirHandle);
+      if (!hasPerm) {
+        addToast('Write permission to the folder was denied.', 'error');
+        return;
+      }
+    }
+
     setBulkStatus('running');
     bulkStatusRef.current = 'running';
     setTimeout(() => runBulkLoop(), 0);
@@ -724,6 +757,14 @@ export default function Home() {
   };
 
   const handleDownloadAllMyDownloads = async () => {
+    if (dirHandle) {
+      const hasPerm = await verifyFolderPermission(dirHandle);
+      if (!hasPerm) {
+        addToast('Write permission to the folder was denied.', 'error');
+        return;
+      }
+    }
+
     setIsSearching(true);
     addToast('Fetching your download history...', 'info');
     try {

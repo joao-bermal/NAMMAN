@@ -47,6 +47,22 @@ const toneHref = (tone: Tone): string => {
   }
 };
 
+const verifyFolderPermission = async (handle: FileSystemDirectoryHandle): Promise<boolean> => {
+  try {
+    const opts = { mode: 'readwrite' as const };
+    if ((await (handle as any).queryPermission(opts)) === 'granted') {
+      return true;
+    }
+    if ((await (handle as any).requestPermission(opts)) === 'granted') {
+      return true;
+    }
+    return false;
+  } catch (e) {
+    console.error('Permission request failed:', e);
+    return false;
+  }
+};
+
 const PAGE_SIZE = 15;
 
 function timeAgo(dateString: string) {
@@ -445,7 +461,14 @@ export default function CreatorPage() {
     }
   };
 
-  const handleDownload = (tone: Tone) => {
+  const handleDownload = async (tone: Tone) => {
+    if (dirHandle) {
+      const hasPerm = await verifyFolderPermission(dirHandle);
+      if (!hasPerm) {
+        addToast('Write permission to the folder was denied.', 'error');
+        return;
+      }
+    }
     setDownloadingItems(prev => new Set(prev).add(tone.id));
     syncQueueRef.current.push(() => doDownload(tone));
     processSyncQueue();
@@ -512,6 +535,13 @@ export default function CreatorPage() {
   };
 
   const handleBulkDownload = async (tonesOrIds: (number | Tone)[]) => {
+    if (dirHandle) {
+      const hasPerm = await verifyFolderPermission(dirHandle);
+      if (!hasPerm) {
+        addToast('Write permission to the folder was denied.', 'error');
+        return;
+      }
+    }
     const tonesMap = new Map(allTones.map(t => [t.id, t]));
     const initialItems: BulkItem[] = tonesOrIds.map(x => {
       const id = typeof x === 'number' ? x : x.id;
@@ -540,7 +570,14 @@ export default function CreatorPage() {
     setBulkStatus('paused');
   };
 
-  const handleResumeBulk = () => {
+  const handleResumeBulk = async () => {
+    if (dirHandle) {
+      const hasPerm = await verifyFolderPermission(dirHandle);
+      if (!hasPerm) {
+        addToast('Write permission to the folder was denied.', 'error');
+        return;
+      }
+    }
     setBulkStatus('running');
     bulkStatusRef.current = 'running';
     setTimeout(() => runBulkLoop(), 0);
