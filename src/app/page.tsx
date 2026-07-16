@@ -11,7 +11,7 @@ import { useRouter } from 'next/navigation';
 import { DownloadCloud, CheckCircle, Bookmark, Folder, FolderOpen, ExternalLink, LogOut, Layers, Server, Box, Sliders, Radio, Activity, Search, Grid, Download, X, CheckSquare, Square, AlertTriangle } from 'lucide-react';
 import { get, set } from 'idb-keyval';
 
-import { PUBLISHABLE_KEY, getRedirectUri } from '@/lib/tone3000/config';
+import { PUBLISHABLE_KEY, SUPABASE_ANON_KEY, getRedirectUri } from '@/lib/tone3000/config';
 import {
   T3KClient,
   startStandardFlow,
@@ -361,13 +361,31 @@ export default function Home() {
             // no metadata.json
           }
 
-          // If no metadata.json, check if the folder contains any .nam or .wav files
+          // If no metadata.json, check if the folder contains any .nam or .wav files (including 1 level of subdirectories)
           if (!hasMeta) {
             let hasFiles = false;
             for await (const [fileName, fileEntry] of (packHandle as any).entries()) {
               if (fileEntry.kind === 'file' && (fileEntry.name.endsWith('.nam') || fileEntry.name.endsWith('.wav'))) {
                 hasFiles = true;
                 break;
+              }
+            }
+
+            if (!hasFiles) {
+              try {
+                for await (const [subName, subEntry] of (packHandle as any).entries()) {
+                  if (subEntry.kind === 'directory') {
+                    for await (const [fileName, fileEntry] of (subEntry as any).entries()) {
+                      if (fileEntry.kind === 'file' && (fileEntry.name.endsWith('.nam') || fileEntry.name.endsWith('.wav'))) {
+                        hasFiles = true;
+                        break;
+                      }
+                    }
+                  }
+                  if (hasFiles) break;
+                }
+              } catch (e) {
+                // ignore permission or iteration errors
               }
             }
 
@@ -379,6 +397,30 @@ export default function Home() {
                 if (normalizedPackName === normalizedOldTitle || normalizedPackName.includes(normalizedOldTitle) || normalizedOldTitle.includes(normalizedPackName)) {
                   toneId = oldId;
                   break;
+                }
+              }
+
+              // If still not resolved, query Supabase rest api dynamically in the browser!
+              if (!toneId) {
+                let cleanTitle = packHandle.name
+                  .replace(/_LiveSPICE2NAM_/g, '')
+                  .replace(/_Snapshots_/g, '')
+                  .replace(/_Update.*$/g, '')
+                  .replace(/_g/g, '')
+                  .replace(/_/g, ' ')
+                  .replace(/\s+/g, ' ')
+                  .trim();
+                
+                try {
+                  const url = `https://api.tone3000.com/rest/v1/tones?title=ilike.*${encodeURIComponent(cleanTitle)}*&select=id,title&limit=1`;
+                  const res = await fetch(url, { headers: { "apikey": SUPABASE_ANON_KEY } });
+                  const data = await res.json();
+                  if (data && data.length > 0) {
+                    toneId = data[0].id;
+                    title = data[0].title;
+                  }
+                } catch (e) {
+                  // ignore
                 }
               }
             }
