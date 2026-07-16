@@ -336,9 +336,8 @@ export default function CreatorPage() {
     const g = tone.gear?.toLowerCase() || 'unknown';
     if (g === 'full-rig' || g === 'amp-cab') return 'Amp_and_Cab';
     if (g === 'amp' || g === 'amp-head') return 'Amps';
-    if (g === 'cabinet' || g === 'cab') return 'Cabinets';
+    if (g === 'cabinet' || g === 'cab' || g === 'ir') return 'Cabinets_IRs';
     if (g === 'pedal') return 'Pedals';
-    if (g === 'ir') return 'IRs';
     if (g === 'spaces') return 'Spaces';
     return 'Other';
   };

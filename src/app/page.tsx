@@ -311,6 +311,92 @@ export default function Home() {
     }
   }, []);
 
+  const [untrackedTones, setUntrackedTones] = useState<{ id: number; title: string }[]>([]);
+
+  const scanLocalFolderForUntrackedTones = useCallback(async (dir: FileSystemDirectoryHandle, onlineIds: Set<number>) => {
+    try {
+      const foundTones: { id: number; title: string }[] = [];
+      const categories = ['Amp_and_Cab', 'Amps', 'Pedals', 'Cabinets_IRs', 'Spaces', 'Outboard', 'Experimental', 'Other'];
+      
+      // Load our pre-resolved mapping for old folders lacking metadata
+      let resolvedOldTonesMap = new Map<string, number>();
+      try {
+        const resolvedOld = (await import('../lib/tone3000/resolved_old_tones.json')).default;
+        resolvedOld.forEach(item => {
+          resolvedOldTonesMap.set(item.title.toLowerCase(), item.id);
+        });
+      } catch (e) {
+        console.error('Failed to load resolved_old_tones.json', e);
+      }
+
+      for (const catName of categories) {
+        let catHandle: FileSystemDirectoryHandle;
+        try {
+          catHandle = await dir.getDirectoryHandle(catName);
+        } catch {
+          continue; // category folder doesn't exist yet
+        }
+
+        // Iterate over subfolders (each represents a pack)
+        for await (const [packName, entry] of (catHandle as any).entries()) {
+          if (entry.kind !== 'directory') continue;
+          const packHandle = entry as FileSystemDirectoryHandle;
+          
+          let hasMeta = false;
+          let toneId: number | null = null;
+          let title = packHandle.name;
+
+          // Check for metadata.json
+          try {
+            const metaFileHandle = await packHandle.getFileHandle('metadata.json');
+            const file = await metaFileHandle.getFile();
+            const text = await file.text();
+            const meta = JSON.parse(text);
+            if (meta && typeof meta.id === 'number') {
+              toneId = meta.id;
+              title = meta.title || title;
+              hasMeta = true;
+            }
+          } catch {
+            // no metadata.json
+          }
+
+          // If no metadata.json, check if the folder contains any .nam or .wav files
+          if (!hasMeta) {
+            let hasFiles = false;
+            for await (const [fileName, fileEntry] of (packHandle as any).entries()) {
+              if (fileEntry.kind === 'file' && (fileEntry.name.endsWith('.nam') || fileEntry.name.endsWith('.wav'))) {
+                hasFiles = true;
+                break;
+              }
+            }
+
+            if (hasFiles) {
+              // Try to resolve toneId using the folder name match in our pre-resolved mapping
+              const normalizedPackName = packHandle.name.replace(/[^a-z0-9]/gi, '').toLowerCase();
+              for (const [oldTitle, oldId] of resolvedOldTonesMap.entries()) {
+                const normalizedOldTitle = oldTitle.replace(/[^a-z0-9]/gi, '').toLowerCase();
+                if (normalizedPackName === normalizedOldTitle || normalizedPackName.includes(normalizedOldTitle) || normalizedOldTitle.includes(normalizedPackName)) {
+                  toneId = oldId;
+                  break;
+                }
+              }
+            }
+          }
+
+          // If we resolved a Tone ID, check if it's NOT in the online download history
+          if (toneId && !onlineIds.has(toneId)) {
+            foundTones.push({ id: toneId, title });
+          }
+        }
+      }
+
+      setUntrackedTones(foundTones);
+    } catch (err) {
+      console.error('Error scanning local folder:', err);
+    }
+  }, []);
+
   const bootstrapConnected = useCallback(async () => {
     setConnected(true);
     try {
@@ -358,6 +444,14 @@ export default function Home() {
       setConnected(false);
     }
   }, [bootstrapConnected]);
+
+  useEffect(() => {
+    if (dirHandle && connected) {
+      scanLocalFolderForUntrackedTones(dirHandle, downloadedIds);
+    } else {
+      setUntrackedTones([]);
+    }
+  }, [dirHandle, downloadedIds, connected, scanLocalFolderForUntrackedTones]);
 
   const connect = () => startStandardFlow(PUBLISHABLE_KEY, getRedirectUri());
 
@@ -792,7 +886,7 @@ export default function Home() {
     }
   };
 
-  const handleSyncOldProfiles = async () => {
+  const handleSyncUntrackedTones = async () => {
     if (dirHandle) {
       const hasPerm = await verifyFolderPermission(dirHandle);
       if (!hasPerm) {
@@ -800,26 +894,22 @@ export default function Home() {
         return;
       }
     }
-    try {
-      const resolvedTones = (await import('../lib/tone3000/resolved_old_tones.json')).default;
-      const tonesToSync = resolvedTones.map(item => ({
-        id: item.id,
-        title: item.title,
-        status: 'pending' as const
-      }));
+    if (untrackedTones.length === 0) return;
 
-      bulkItemsRef.current = tonesToSync;
-      setBulkItems(tonesToSync);
-      setBulkStatus('running');
-      setIsBulkPanelOpen(true);
-      
-      // Start loop
-      setTimeout(() => runBulkLoop(), 0);
-      addToast(`Queued ${tonesToSync.length} older profiles for metadata re-sync.`, 'success');
-    } catch (err: any) {
-      console.error(err);
-      addToast(`Failed to initialize re-sync: ${err.message}`, 'error');
-    }
+    const tonesToSync = untrackedTones.map(item => ({
+      id: item.id,
+      title: item.title,
+      status: 'pending' as const
+    }));
+
+    bulkItemsRef.current = tonesToSync;
+    setBulkItems(tonesToSync);
+    setBulkStatus('running');
+    setIsBulkPanelOpen(true);
+    
+    // Start loop
+    setTimeout(() => runBulkLoop(), 0);
+    addToast(`Queued ${tonesToSync.length} untracked profiles for sync.`, 'success');
   };
 
   const handleSelectPage = () => {
@@ -912,20 +1002,20 @@ export default function Home() {
         </button>
       </div>
 
-      {dirHandle && (
+      {dirHandle && untrackedTones.length > 0 && (
         <div style={{ display: 'flex', gap: '1rem', marginTop: '-2rem', marginBottom: '3rem', padding: '1.5rem', background: 'rgba(250, 204, 21, 0.05)', border: '1px solid rgba(250, 204, 21, 0.2)', borderRadius: '12px', alignItems: 'center', justifyContent: 'space-between', width: '100%', flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', flex: 1, minWidth: '300px' }}>
             <AlertTriangle size={24} style={{ color: '#facc15', flexShrink: 0 }} />
             <span style={{ fontSize: '1.05rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
-              We identified <strong>174 older profiles</strong> in your <code>Amp_and_Cab</code> directory that were synced before the 15/07 update and lack the new <code>metadata.json</code> format or are incomplete.
+              We identified <strong>{untrackedTones.length} local profile{untrackedTones.length > 1 ? 's' : ''}</strong> that are missing metadata or not registered in your online download history.
             </span>
           </div>
           <button 
-            onClick={handleSyncOldProfiles} 
+            onClick={handleSyncUntrackedTones} 
             className="search-button" 
             style={{ padding: '0.8rem 1.5rem', fontSize: '1rem', background: '#facc15', color: '#000', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 600 }}
           >
-            Update/Re-sync all 174 Profiles
+            Update/Re-sync all {untrackedTones.length} Profiles
           </button>
         </div>
       )}
