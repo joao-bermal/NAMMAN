@@ -455,14 +455,22 @@ export default function Home() {
             }
           }
 
-          // If we resolved a Tone ID, check if it's NOT in the online download history
-          if (toneId && !onlineIds.has(toneId)) {
+          // If we resolved a Tone ID, check if it has no metadata OR is not in the online download history
+          if (toneId && (!hasMeta || !onlineIds.has(toneId))) {
             foundTones.push({ id: toneId, title });
           }
         }
       }
 
-      setUntrackedTones(foundTones);
+      // Deduplicate foundTones by Tone ID to prevent duplicate React keys
+      const seenIds = new Set<number>();
+      const uniqTones = foundTones.filter(t => {
+        if (seenIds.has(t.id)) return false;
+        seenIds.add(t.id);
+        return true;
+      });
+
+      setUntrackedTones(uniqTones);
     } catch (err) {
       console.error('Error scanning local folder:', err);
     }
