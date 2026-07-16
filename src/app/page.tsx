@@ -8,7 +8,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import { DownloadCloud, CheckCircle, Bookmark, Folder, FolderOpen, ExternalLink, LogOut, Layers, Server, Box, Sliders, Radio, Activity, Search, Grid, Download, X, CheckSquare, Square } from 'lucide-react';
+import { DownloadCloud, CheckCircle, Bookmark, Folder, FolderOpen, ExternalLink, LogOut, Layers, Server, Box, Sliders, Radio, Activity, Search, Grid, Download, X, CheckSquare, Square, AlertTriangle } from 'lucide-react';
 import { get, set } from 'idb-keyval';
 
 import { PUBLISHABLE_KEY, getRedirectUri } from '@/lib/tone3000/config';
@@ -792,6 +792,36 @@ export default function Home() {
     }
   };
 
+  const handleSyncOldProfiles = async () => {
+    if (dirHandle) {
+      const hasPerm = await verifyFolderPermission(dirHandle);
+      if (!hasPerm) {
+        addToast('Write permission to the folder was denied.', 'error');
+        return;
+      }
+    }
+    try {
+      const resolvedTones = (await import('../lib/tone3000/resolved_old_tones.json')).default;
+      const tonesToSync = resolvedTones.map(item => ({
+        id: item.id,
+        title: item.title,
+        status: 'pending' as const
+      }));
+
+      bulkItemsRef.current = tonesToSync;
+      setBulkItems(tonesToSync);
+      setBulkStatus('running');
+      setIsBulkPanelOpen(true);
+      
+      // Start loop
+      setTimeout(() => runBulkLoop(), 0);
+      addToast(`Queued ${tonesToSync.length} older profiles for metadata re-sync.`, 'success');
+    } catch (err: any) {
+      console.error(err);
+      addToast(`Failed to initialize re-sync: ${err.message}`, 'error');
+    }
+  };
+
   const handleSelectPage = () => {
     const pageIds = results.map(t => t.id);
     const allSelected = pageIds.every(id => selectedIds.has(id));
@@ -881,6 +911,24 @@ export default function Home() {
           {dirHandle ? 'Change Folder' : 'Select Local Folder'}
         </button>
       </div>
+
+      {dirHandle && (
+        <div style={{ display: 'flex', gap: '1rem', marginTop: '-2rem', marginBottom: '3rem', padding: '1.5rem', background: 'rgba(250, 204, 21, 0.05)', border: '1px solid rgba(250, 204, 21, 0.2)', borderRadius: '12px', alignItems: 'center', justifyContent: 'space-between', width: '100%', flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', flex: 1, minWidth: '300px' }}>
+            <AlertTriangle size={24} style={{ color: '#facc15', flexShrink: 0 }} />
+            <span style={{ fontSize: '1.05rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
+              We identified <strong>174 older profiles</strong> in your <code>Amp_and_Cab</code> directory that were synced before the 15/07 update and lack the new <code>metadata.json</code> format or are incomplete.
+            </span>
+          </div>
+          <button 
+            onClick={handleSyncOldProfiles} 
+            className="search-button" 
+            style={{ padding: '0.8rem 1.5rem', fontSize: '1rem', background: '#facc15', color: '#000', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 600 }}
+          >
+            Update/Re-sync all 174 Profiles
+          </button>
+        </div>
+      )}
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem', borderBottom: '1px solid var(--surface-border)', paddingBottom: '1rem', flexWrap: 'wrap', gap: '1rem' }}>
         <div style={{ display: 'flex', gap: '1rem' }}>
