@@ -316,7 +316,7 @@ export default function Home() {
   const scanLocalFolderForUntrackedTones = useCallback(async (dir: FileSystemDirectoryHandle, onlineIds: Set<number>) => {
     try {
       const foundTones: { id: number; title: string }[] = [];
-      const categories = ['Amp_and_Cab', 'Amps', 'Pedals', 'Cabinets_IRs', 'Spaces', 'Outboard', 'Experimental', 'Other'];
+      const categories = ['Amp_and_Cab', 'Amps', 'Pedals', 'Cabinets', 'Cabinets_IRs', 'Spaces', 'Outboard', 'Experimental', 'Other'];
       
       // Load our pre-resolved mapping for old folders lacking metadata
       let resolvedOldTonesMap = new Map<string, number>();
@@ -328,6 +328,30 @@ export default function Home() {
       } catch (e) {
         console.error('Failed to load resolved_old_tones.json', e);
       }
+
+      // Helper to clean search query from folder name
+      const cleanSearchQuery = (folderName: string): string => {
+        let name = folderName.replace(/\(.*?\)/g, '').replace(/\[.*?\]/g, '');
+        name = name.replace(/[^a-zA-Z0-9\s]/g, ' ');
+        const words = name.split(/\s+/).map(w => w.trim()).filter(w => {
+          const l = w.toLowerCase();
+          return w.length > 1 && 
+            !['and', 'the', 'for', 'with', 'mix', 'ready', 'pack', 'raw', 'amp', 'head', 'cab', 'cabinet', 'speaker', 'speakers', 'celestion', 'eminence', 'jensen', 'alnico', 'greenback', 'creamback', 'v30', 'sm57', 'm201', 'di', 'ch', 'channel', 'gain', 'presets', 'preset', 'snapshots', 'snapshot', 'todds', 'todd'].includes(l);
+        });
+        return words.slice(0, 2).join(' ');
+      };
+
+      // Helper to calculate similarity score
+      const getSimilarityScore = (s1: string, s2: string): number => {
+        const clean1 = s1.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const clean2 = s2.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (clean1 === clean2) return 1.0;
+        if (clean1.includes(clean2) || clean2.includes(clean1)) return 0.8;
+        const w1 = s1.toLowerCase().split(/[^a-z0-9]/).filter(Boolean);
+        const w2 = s2.toLowerCase().split(/[^a-z0-9]/).filter(Boolean);
+        const intersection = w1.filter(w => w2.includes(w));
+        return intersection.length / Math.max(w1.length, w2.length);
+      };
 
       for (const catName of categories) {
         let catHandle: FileSystemDirectoryHandle;
@@ -402,25 +426,30 @@ export default function Home() {
 
               // If still not resolved, query Supabase rest api dynamically in the browser!
               if (!toneId) {
-                let cleanTitle = packHandle.name
-                  .replace(/_LiveSPICE2NAM_/g, '')
-                  .replace(/_Snapshots_/g, '')
-                  .replace(/_Update.*$/g, '')
-                  .replace(/_g/g, '')
-                  .replace(/_/g, ' ')
-                  .replace(/\s+/g, ' ')
-                  .trim();
-                
-                try {
-                  const url = `https://api.tone3000.com/rest/v1/tones?title=ilike.*${encodeURIComponent(cleanTitle)}*&select=id,title&limit=1`;
-                  const res = await fetch(url, { headers: { "apikey": SUPABASE_ANON_KEY } });
-                  const data = await res.json();
-                  if (data && data.length > 0) {
-                    toneId = data[0].id;
-                    title = data[0].title;
+                const searchQ = cleanSearchQuery(packHandle.name);
+                if (searchQ) {
+                  try {
+                    const url = `https://api.tone3000.com/rest/v1/tones?title=ilike.*${encodeURIComponent(searchQ)}*&select=id,title&limit=20`;
+                    const res = await fetch(url, { headers: { "apikey": SUPABASE_ANON_KEY } });
+                    const data = await res.json();
+                    if (data && data.length > 0) {
+                      let bestMatch = null;
+                      let maxScore = 0;
+                      for (const item of data) {
+                        const score = getSimilarityScore(packHandle.name, item.title);
+                        if (score > maxScore) {
+                          maxScore = score;
+                          bestMatch = item;
+                        }
+                      }
+                      if (bestMatch && maxScore >= 0.25) {
+                        toneId = bestMatch.id;
+                        title = bestMatch.title;
+                      }
+                    }
+                  } catch (e) {
+                    // ignore
                   }
-                } catch (e) {
-                  // ignore
                 }
               }
             }
