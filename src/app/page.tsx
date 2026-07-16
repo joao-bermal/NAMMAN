@@ -388,10 +388,16 @@ export default function Home() {
           // If no metadata.json, check if the folder contains any .nam or .wav files (including 1 level of subdirectories)
           if (!hasMeta) {
             let hasFiles = false;
+            let namFileHandle: FileSystemFileHandle | null = null;
+            
             for await (const [fileName, fileEntry] of (packHandle as any).entries()) {
-              if (fileEntry.kind === 'file' && (fileEntry.name.endsWith('.nam') || fileEntry.name.endsWith('.wav'))) {
-                hasFiles = true;
-                break;
+              if (fileEntry.kind === 'file') {
+                if (fileEntry.name.endsWith('.nam')) {
+                  namFileHandle = fileEntry as FileSystemFileHandle;
+                  hasFiles = true;
+                } else if (fileEntry.name.endsWith('.wav')) {
+                  hasFiles = true;
+                }
               }
             }
 
@@ -400,9 +406,13 @@ export default function Home() {
                 for await (const [subName, subEntry] of (packHandle as any).entries()) {
                   if (subEntry.kind === 'directory') {
                     for await (const [fileName, fileEntry] of (subEntry as any).entries()) {
-                      if (fileEntry.kind === 'file' && (fileEntry.name.endsWith('.nam') || fileEntry.name.endsWith('.wav'))) {
-                        hasFiles = true;
-                        break;
+                      if (fileEntry.kind === 'file') {
+                        if (fileEntry.name.endsWith('.nam')) {
+                          namFileHandle = fileEntry as FileSystemFileHandle;
+                          hasFiles = true;
+                        } else if (fileEntry.name.endsWith('.wav')) {
+                          hasFiles = true;
+                        }
                       }
                     }
                   }
@@ -421,6 +431,27 @@ export default function Home() {
                 if (normalizedPackName === normalizedOldTitle || normalizedPackName.includes(normalizedOldTitle) || normalizedOldTitle.includes(normalizedPackName)) {
                   toneId = oldId;
                   break;
+                }
+              }
+
+              // Try to resolve using model name inside the .nam file
+              if (!toneId && namFileHandle) {
+                try {
+                  const file = await namFileHandle.getFile();
+                  const text = await file.text();
+                  const parsed = JSON.parse(text);
+                  if (parsed.metadata && parsed.metadata.name) {
+                    const modelName = parsed.metadata.name;
+                    const fuzzy = modelName.replace(/[^a-zA-Z0-9]/g, '%');
+                    const url = `https://api.tone3000.com/rest/v1/models?name=ilike.*${encodeURIComponent(fuzzy)}*&select=tone_id&limit=1`;
+                    const res = await fetch(url, { headers: { "apikey": SUPABASE_ANON_KEY } });
+                    const data = await res.json();
+                    if (data && data.length > 0 && data[0].tone_id) {
+                      toneId = data[0].tone_id;
+                    }
+                  }
+                } catch (e) {
+                  // ignore
                 }
               }
 
