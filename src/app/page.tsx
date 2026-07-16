@@ -311,201 +311,7 @@ export default function Home() {
     }
   }, []);
 
-  const [untrackedTones, setUntrackedTones] = useState<{ id: number; title: string }[]>([]);
 
-  const scanLocalFolderForUntrackedTones = useCallback(async (dir: FileSystemDirectoryHandle, onlineIds: Set<number>) => {
-    try {
-      const foundTones: { id: number; title: string }[] = [];
-      const categories = ['Amp_and_Cab', 'Amps', 'Pedals', 'Cabinets', 'Cabinets_IRs', 'Spaces', 'Outboard', 'Experimental', 'Other'];
-      
-      // Load our pre-resolved mapping for old folders lacking metadata
-      let resolvedOldTonesMap = new Map<string, number>();
-      try {
-        const resolvedOld = (await import('../lib/tone3000/resolved_old_tones.json')).default;
-        resolvedOld.forEach(item => {
-          resolvedOldTonesMap.set(item.title.toLowerCase(), item.id);
-        });
-      } catch (e) {
-        console.error('Failed to load resolved_old_tones.json', e);
-      }
-
-      // Helper to clean search query from folder name
-      const cleanSearchQuery = (folderName: string): string => {
-        let name = folderName.replace(/\(.*?\)/g, '').replace(/\[.*?\]/g, '');
-        name = name.replace(/[^a-zA-Z0-9\s]/g, ' ');
-        const words = name.split(/\s+/).map(w => w.trim()).filter(w => {
-          const l = w.toLowerCase();
-          return w.length > 1 && 
-            !['and', 'the', 'for', 'with', 'mix', 'ready', 'pack', 'raw', 'amp', 'head', 'cab', 'cabinet', 'speaker', 'speakers', 'celestion', 'eminence', 'jensen', 'alnico', 'greenback', 'creamback', 'v30', 'sm57', 'm201', 'di', 'ch', 'channel', 'gain', 'presets', 'preset', 'snapshots', 'snapshot', 'todds', 'todd'].includes(l);
-        });
-        return words.slice(0, 2).join(' ');
-      };
-
-      // Helper to calculate similarity score
-      const getSimilarityScore = (s1: string, s2: string): number => {
-        const clean1 = s1.toLowerCase().replace(/[^a-z0-9]/g, '');
-        const clean2 = s2.toLowerCase().replace(/[^a-z0-9]/g, '');
-        if (clean1 === clean2) return 1.0;
-        if (clean1.includes(clean2) || clean2.includes(clean1)) return 0.8;
-        const w1 = s1.toLowerCase().split(/[^a-z0-9]/).filter(Boolean);
-        const w2 = s2.toLowerCase().split(/[^a-z0-9]/).filter(Boolean);
-        const intersection = w1.filter(w => w2.includes(w));
-        return intersection.length / Math.max(w1.length, w2.length);
-      };
-
-      for (const catName of categories) {
-        let catHandle: FileSystemDirectoryHandle;
-        try {
-          catHandle = await dir.getDirectoryHandle(catName);
-        } catch {
-          continue; // category folder doesn't exist yet
-        }
-
-        // Iterate over subfolders (each represents a pack)
-        for await (const [packName, entry] of (catHandle as any).entries()) {
-          if (entry.kind !== 'directory') continue;
-          const packHandle = entry as FileSystemDirectoryHandle;
-          
-          let hasMeta = false;
-          let toneId: number | null = null;
-          let title = packHandle.name;
-
-          // Check for metadata.json
-          try {
-            const metaFileHandle = await packHandle.getFileHandle('metadata.json');
-            const file = await metaFileHandle.getFile();
-            const text = await file.text();
-            const meta = JSON.parse(text);
-            if (meta && typeof meta.id === 'number') {
-              toneId = meta.id;
-              title = meta.title || title;
-              hasMeta = true;
-            }
-          } catch {
-            // no metadata.json
-          }
-
-          // If no metadata.json, check if the folder contains any .nam or .wav files (including 1 level of subdirectories)
-          if (!hasMeta) {
-            let hasFiles = false;
-            let namFileHandle: FileSystemFileHandle | null = null;
-            
-            for await (const [fileName, fileEntry] of (packHandle as any).entries()) {
-              if (fileEntry.kind === 'file') {
-                if (fileEntry.name.endsWith('.nam')) {
-                  namFileHandle = fileEntry as FileSystemFileHandle;
-                  hasFiles = true;
-                } else if (fileEntry.name.endsWith('.wav')) {
-                  hasFiles = true;
-                }
-              }
-            }
-
-            if (!hasFiles) {
-              try {
-                for await (const [subName, subEntry] of (packHandle as any).entries()) {
-                  if (subEntry.kind === 'directory') {
-                    for await (const [fileName, fileEntry] of (subEntry as any).entries()) {
-                      if (fileEntry.kind === 'file') {
-                        if (fileEntry.name.endsWith('.nam')) {
-                          namFileHandle = fileEntry as FileSystemFileHandle;
-                          hasFiles = true;
-                        } else if (fileEntry.name.endsWith('.wav')) {
-                          hasFiles = true;
-                        }
-                      }
-                    }
-                  }
-                  if (hasFiles) break;
-                }
-              } catch (e) {
-                // ignore permission or iteration errors
-              }
-            }
-
-            if (hasFiles) {
-              // Try to resolve toneId using the folder name match in our pre-resolved mapping
-              const normalizedPackName = packHandle.name.replace(/[^a-z0-9]/gi, '').toLowerCase();
-              for (const [oldTitle, oldId] of resolvedOldTonesMap.entries()) {
-                const normalizedOldTitle = oldTitle.replace(/[^a-z0-9]/gi, '').toLowerCase();
-                if (normalizedPackName === normalizedOldTitle || normalizedPackName.includes(normalizedOldTitle) || normalizedOldTitle.includes(normalizedPackName)) {
-                  toneId = oldId;
-                  break;
-                }
-              }
-
-              // Try to resolve using model name inside the .nam file
-              if (!toneId && namFileHandle) {
-                try {
-                  const file = await namFileHandle.getFile();
-                  const text = await file.text();
-                  const parsed = JSON.parse(text);
-                  if (parsed.metadata && parsed.metadata.name) {
-                    const modelName = parsed.metadata.name;
-                    const fuzzy = modelName.replace(/[^a-zA-Z0-9]/g, '%');
-                    const url = `https://api.tone3000.com/rest/v1/models?name=ilike.*${encodeURIComponent(fuzzy)}*&select=tone_id&limit=1`;
-                    const res = await fetch(url, { headers: { "apikey": SUPABASE_ANON_KEY } });
-                    const data = await res.json();
-                    if (data && data.length > 0 && data[0].tone_id) {
-                      toneId = data[0].tone_id;
-                    }
-                  }
-                } catch (e) {
-                  // ignore
-                }
-              }
-
-              // If still not resolved, query Supabase rest api dynamically in the browser!
-              if (!toneId) {
-                const searchQ = cleanSearchQuery(packHandle.name);
-                if (searchQ) {
-                  try {
-                    const url = `https://api.tone3000.com/rest/v1/tones?title=ilike.*${encodeURIComponent(searchQ)}*&select=id,title&limit=20`;
-                    const res = await fetch(url, { headers: { "apikey": SUPABASE_ANON_KEY } });
-                    const data = await res.json();
-                    if (data && data.length > 0) {
-                      let bestMatch = null;
-                      let maxScore = 0;
-                      for (const item of data) {
-                        const score = getSimilarityScore(packHandle.name, item.title);
-                        if (score > maxScore) {
-                          maxScore = score;
-                          bestMatch = item;
-                        }
-                      }
-                      if (bestMatch && maxScore >= 0.25) {
-                        toneId = bestMatch.id;
-                        title = bestMatch.title;
-                      }
-                    }
-                  } catch (e) {
-                    // ignore
-                  }
-                }
-              }
-            }
-          }
-
-          // If we resolved a Tone ID, check if it has no metadata OR is not in the online download history
-          if (toneId && (!hasMeta || !onlineIds.has(toneId))) {
-            foundTones.push({ id: toneId, title });
-          }
-        }
-      }
-
-      // Deduplicate foundTones by Tone ID to prevent duplicate React keys
-      const seenIds = new Set<number>();
-      const uniqTones = foundTones.filter(t => {
-        if (seenIds.has(t.id)) return false;
-        seenIds.add(t.id);
-        return true;
-      });
-
-      setUntrackedTones(uniqTones);
-    } catch (err) {
-      console.error('Error scanning local folder:', err);
-    }
-  }, []);
 
   const bootstrapConnected = useCallback(async () => {
     setConnected(true);
@@ -555,13 +361,6 @@ export default function Home() {
     }
   }, [bootstrapConnected]);
 
-  useEffect(() => {
-    if (dirHandle && connected) {
-      scanLocalFolderForUntrackedTones(dirHandle, downloadedIds);
-    } else {
-      setUntrackedTones([]);
-    }
-  }, [dirHandle, downloadedIds, connected, scanLocalFolderForUntrackedTones]);
 
   const connect = () => startStandardFlow(PUBLISHABLE_KEY, getRedirectUri());
 
@@ -996,31 +795,6 @@ export default function Home() {
     }
   };
 
-  const handleSyncUntrackedTones = async () => {
-    if (dirHandle) {
-      const hasPerm = await verifyFolderPermission(dirHandle);
-      if (!hasPerm) {
-        addToast('Write permission to the folder was denied.', 'error');
-        return;
-      }
-    }
-    if (untrackedTones.length === 0) return;
-
-    const tonesToSync = untrackedTones.map(item => ({
-      id: item.id,
-      title: item.title,
-      status: 'pending' as const
-    }));
-
-    bulkItemsRef.current = tonesToSync;
-    setBulkItems(tonesToSync);
-    setBulkStatus('running');
-    setIsBulkPanelOpen(true);
-    
-    // Start loop
-    setTimeout(() => runBulkLoop(), 0);
-    addToast(`Queued ${tonesToSync.length} untracked profiles for sync.`, 'success');
-  };
 
   const handleSelectPage = () => {
     const pageIds = results.map(t => t.id);
@@ -1112,23 +886,6 @@ export default function Home() {
         </button>
       </div>
 
-      {dirHandle && untrackedTones.length > 0 && (
-        <div style={{ display: 'flex', gap: '1rem', marginTop: '-2rem', marginBottom: '3rem', padding: '1.5rem', background: 'rgba(250, 204, 21, 0.05)', border: '1px solid rgba(250, 204, 21, 0.2)', borderRadius: '12px', alignItems: 'center', justifyContent: 'space-between', width: '100%', flexWrap: 'wrap' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', flex: 1, minWidth: '300px' }}>
-            <AlertTriangle size={24} style={{ color: '#facc15', flexShrink: 0 }} />
-            <span style={{ fontSize: '1.05rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
-              We identified <strong>{untrackedTones.length} local profile{untrackedTones.length > 1 ? 's' : ''}</strong> that are missing metadata or not registered in your online download history.
-            </span>
-          </div>
-          <button 
-            onClick={handleSyncUntrackedTones} 
-            className="search-button" 
-            style={{ padding: '0.8rem 1.5rem', fontSize: '1rem', background: '#facc15', color: '#000', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 600 }}
-          >
-            Update/Re-sync all {untrackedTones.length} Profiles
-          </button>
-        </div>
-      )}
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem', borderBottom: '1px solid var(--surface-border)', paddingBottom: '1rem', flexWrap: 'wrap', gap: '1rem' }}>
         <div style={{ display: 'flex', gap: '1rem' }}>
