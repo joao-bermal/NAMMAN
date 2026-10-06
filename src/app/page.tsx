@@ -229,6 +229,9 @@ export default function Home() {
   }, []);
 
   const [dirHandle, setDirHandle] = useState<FileSystemDirectoryHandle | null>(null);
+  // Chrome forgets folder permission between visits unless the user picked "Allow on
+  // every visit": the saved handle stays usable, it just needs one click to re-grant.
+  const [folderAccess, setFolderAccess] = useState<'granted' | 'prompt'>('prompt');
   const [toasts, setToasts] = useState<{ id: string; message: string; type: 'success' | 'error' | 'info' }[]>([]);
 
   const addToast = useCallback((message: string, type: 'success' | 'error' | 'info') => {
@@ -243,7 +246,8 @@ export default function Home() {
       const handle = await get<FileSystemDirectoryHandle>(DIR_HANDLE_KEY);
       if (handle) {
         const permission = await (handle as DirectoryHandleWithPermissions).queryPermission({ mode: 'readwrite' });
-        if (permission === 'granted') setDirHandle(handle);
+        setFolderAccess(permission === 'granted' ? 'granted' : 'prompt');
+        setDirHandle(handle);
       }
     } catch {
       // no previous handle
@@ -271,10 +275,19 @@ export default function Home() {
       }
       const handle = await (window as unknown as DirectoryPickerWindow).showDirectoryPicker({ mode: 'readwrite' });
       await set(DIR_HANDLE_KEY, handle);
+      setFolderAccess('granted');
       setDirHandle(handle);
     } catch {
       // cancelled
     }
+  };
+
+  // Must run inside a click handler: Chrome only shows its permission prompt on a user gesture.
+  const ensureFolderAccess = async (): Promise<boolean> => {
+    if (!dirHandle) return false;
+    const ok = await verifyFolderPermission(dirHandle);
+    if (ok) setFolderAccess('granted');
+    return ok;
   };
 
   // ── Auth / bootstrap ──────────────────────────────────────────────────────
@@ -382,12 +395,12 @@ export default function Home() {
   }, [bootstrapConnected]);
 
   useEffect(() => {
-    if (dirHandle) {
+    if (dirHandle && folderAccess === 'granted') {
       scanLocalLibrary(dirHandle);
     } else {
       setLocalTones([]);
     }
-  }, [dirHandle, scanLocalLibrary]);
+  }, [dirHandle, folderAccess, scanLocalLibrary]);
 
   const connect = () => startStandardFlow(PUBLISHABLE_KEY, getRedirectUri());
 
@@ -489,7 +502,7 @@ export default function Home() {
 
   const handleDownload = async (tone: Tone) => {
     if (dirHandle) {
-      const hasPerm = await verifyFolderPermission(dirHandle);
+      const hasPerm = await ensureFolderAccess();
       if (!hasPerm) {
         addToast('Write permission to the folder was denied.', 'error');
         return;
@@ -626,8 +639,12 @@ export default function Home() {
   };
 
   const handleBulkDownload = async (tonesOrIds: (number | Tone)[]) => {
+    if (typeof window !== 'undefined' && 'showDirectoryPicker' in window && !dirHandle) {
+      addToast('Select a local folder above first.', 'info');
+      return;
+    }
     if (dirHandle) {
-      const hasPerm = await verifyFolderPermission(dirHandle);
+      const hasPerm = await ensureFolderAccess();
       if (!hasPerm) {
         addToast('Write permission to the folder was denied.', 'error');
         return;
@@ -663,8 +680,12 @@ export default function Home() {
   };
 
   const handleResumeBulk = async () => {
+    if (typeof window !== 'undefined' && 'showDirectoryPicker' in window && !dirHandle) {
+      addToast('Select a local folder above first.', 'info');
+      return;
+    }
     if (dirHandle) {
-      const hasPerm = await verifyFolderPermission(dirHandle);
+      const hasPerm = await ensureFolderAccess();
       if (!hasPerm) {
         addToast('Write permission to the folder was denied.', 'error');
         return;
@@ -686,7 +707,7 @@ export default function Home() {
 
   const handleDownloadAllMyDownloads = async () => {
     if (dirHandle) {
-      const hasPerm = await verifyFolderPermission(dirHandle);
+      const hasPerm = await ensureFolderAccess();
       if (!hasPerm) {
         addToast('Write permission to the folder was denied.', 'error');
         return;
@@ -799,7 +820,9 @@ export default function Home() {
             <FolderOpen size={24} /> {dirHandle ? 'Synced Local Folder' : 'Local Sync Folder'}
           </h3>
           <p style={{ margin: 0, fontSize: '1.1rem', color: 'var(--text-muted)' }}>
-            {dirHandle ? (
+            {dirHandle && folderAccess !== 'granted' ? (
+              <span style={{ color: '#facc15' }}>Chrome needs your OK again to use <strong>{dirHandle.name}</strong>. Click Reconnect and allow access.</span>
+            ) : dirHandle ? (
               <span style={{ color: '#fff' }}>Saving models directly to: <strong>{dirHandle.name}</strong></span>
             ) : (
               'Select a folder on your computer to enable direct sync.'
@@ -808,6 +831,11 @@ export default function Home() {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
           <SyncModeSelect value={syncMode} onChange={setSyncMode} />
+          {dirHandle && folderAccess !== 'granted' && (
+            <button onClick={ensureFolderAccess} className="search-button" style={{ background: 'var(--primary-color)', color: '#000', border: 'none', fontSize: '1.1rem', padding: '1rem 2rem', borderRadius: '8px' }}>
+              Reconnect folder
+            </button>
+          )}
           <button onClick={selectDirectory} className="search-button" style={{ background: dirHandle ? 'transparent' : 'var(--primary-color)', color: dirHandle ? 'var(--primary-color)' : '#000', border: dirHandle ? '1px solid var(--primary-color)' : 'none', fontSize: '1.1rem', padding: '1rem 2rem', borderRadius: '8px' }}>
             {dirHandle ? 'Change Folder' : 'Select Local Folder'}
           </button>
@@ -820,7 +848,7 @@ export default function Home() {
             <LibraryCleanup
               root={dirHandle}
               mode={syncMode}
-              ensurePermission={() => verifyFolderPermission(dirHandle)}
+              ensurePermission={ensureFolderAccess}
               notify={addToast}
               onFinished={() => scanLocalLibrary(dirHandle)}
             />
