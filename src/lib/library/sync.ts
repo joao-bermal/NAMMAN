@@ -50,6 +50,31 @@ async function listAllModels(client: T3KClient, toneId: number, architecture?: n
   return out;
 }
 
+/**
+ * True when `filename` already exists in the pack as a different version of the
+ * model about to be written (e.g. a custom "Hyper Accuracy" file where the A2 file
+ * has the same name), so it must be archived instead of overwritten.
+ */
+async function holdsOtherVersion(
+  pack: FileSystemDirectoryHandle,
+  filename: string,
+  model: Pick<Model, 'architecture_version'>,
+  listedBefore: Map<string, PackModelInfo>,
+): Promise<boolean> {
+  const kind = modelKind(model);
+  if (kind === 'ir') return false;
+  let existing: File;
+  try {
+    existing = await (await pack.getFileHandle(filename)).getFile();
+  } catch {
+    return false;
+  }
+  const info = listedBefore.get(filename);
+  if (info?.architecture != null) return String(info.architecture) !== kind;
+  // Not in the previous metadata: all we can tell from the file is A2 vs legacy.
+  return (await isA2File(existing)) !== (kind === '2');
+}
+
 function browserDownload(data: Blob, filename: string) {
   const url = URL.createObjectURL(data);
   const a = Object.assign(document.createElement('a'), { href: url, download: filename });
@@ -80,6 +105,8 @@ export async function syncTone({ client, root, tone, mode, location, url }: Sync
 
   const usedNames = new Set<string>();
   const models: PackModelInfo[] = [];
+  const archived: string[] = [];
+  const listedBefore = new Map((previous?.models ?? []).map(m => [m.filename, m]));
   let failed = 0;
 
   for (const m of selected) {
@@ -109,8 +136,14 @@ export async function syncTone({ client, root, tone, mode, location, url }: Sync
       const ext = (new URL(m.model_url).pathname.match(/\.([a-z0-9]+)$/i)?.[0] ?? '.nam').toLowerCase();
       const filename = base + ext;
 
-      if (pack) await writeFile(pack, filename, blob);
-      else browserDownload(blob, filename);
+      if (root && pack) {
+        if (await holdsOtherVersion(pack, filename, m, listedBefore)) {
+          archived.push(await archiveFile(root, pack, target.category, target.folder, filename));
+        }
+        await writeFile(pack, filename, blob);
+      } else {
+        browserDownload(blob, filename);
+      }
 
       models.push({
         id: m.id,
@@ -130,11 +163,9 @@ export async function syncTone({ client, root, tone, mode, location, url }: Sync
   // Move out files this sync replaced: anything the previous sync wrote that is no
   // longer selected, plus model files of an architecture we didn't keep (leftovers
   // from older versions of NAMMAN). Only after a complete sync, and only to _Archive.
-  const archived: string[] = [];
   if (root && pack && failed === 0) {
     const keep = new Set(selected.map(modelKind).filter((k): k is NamArch => k !== 'ir'));
     const written = new Set(models.map(m => m.filename));
-    const listedBefore = new Set((previous?.models ?? []).map(m => m.filename));
 
     for (const entry of await listEntries(pack)) {
       if (entry.kind !== 'file' || entry.name === METADATA_FILE || written.has(entry.name)) continue;
