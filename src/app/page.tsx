@@ -11,7 +11,7 @@ import { useRouter } from 'next/navigation';
 import { DownloadCloud, CheckCircle, Bookmark, Folder, FolderOpen, ExternalLink, LogOut, Layers, Server, Box, Sliders, Radio, Activity, Search, Grid, Download, X, CheckSquare, Square, AlertTriangle } from 'lucide-react';
 import { get, set } from 'idb-keyval';
 
-import { PUBLISHABLE_KEY, SUPABASE_ANON_KEY, getRedirectUri } from '@/lib/tone3000/config';
+import { PUBLISHABLE_KEY, getRedirectUri } from '@/lib/tone3000/config';
 import {
   T3KClient,
   startStandardFlow,
@@ -137,7 +137,6 @@ export default function Home() {
   const [localTones, setLocalTones] = useState<Tone[]>([]);
   // Where each tone already lives on disk (by tone id), so re-syncs reuse the folder.
   const localIndexRef = useRef<Map<number, PackLocation>>(new Map());
-  const [autoFavorite, setAutoFavorite] = useState(false);
 
   const [syncMode, setSyncMode] = useSyncMode();
   // Queued and bulk syncs run from older closures; read the current choice from a ref.
@@ -256,19 +255,6 @@ export default function Home() {
       // no previous handle
     }
   }, []);
-
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('namman_auto_favorite');
-      if (saved) setAutoFavorite(saved === 'true');
-    }
-  }, []);
-
-  const toggleAutoFavorite = () => {
-    const next = !autoFavorite;
-    setAutoFavorite(next);
-    localStorage.setItem('namman_auto_favorite', String(next));
-  };
 
   const selectDirectory = async () => {
     try {
