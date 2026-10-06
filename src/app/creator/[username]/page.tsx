@@ -11,7 +11,12 @@ import {
 
 import { PUBLISHABLE_KEY, getRedirectUri } from '@/lib/tone3000/config';
 import { T3KClient, startStandardFlow } from '@/lib/tone3000/tone3000-client';
-import { Gear, TonesSort, type Tone, type Model, type ArchitectureVersion } from '@/lib/tone3000/types';
+import { Gear, TonesSort, type Tone, type ArchitectureVersion } from '@/lib/tone3000/types';
+import { scanLibrary, type PackLocation } from '@/lib/library/library';
+import { NoMatchingModelsError, syncTone } from '@/lib/library/sync';
+import { useSyncMode } from '@/lib/library/preferences';
+import { SYNC_MODES } from '@/lib/library/versions';
+import SyncModeSelect from '../../components/SyncModeSelect';
 
 const client = new T3KClient(PUBLISHABLE_KEY, () => {
   if (typeof window !== 'undefined') startStandardFlow(PUBLISHABLE_KEY, getRedirectUri());
@@ -180,6 +185,13 @@ export default function CreatorPage() {
   const [isPanelOpen, setIsPanelOpen] = useState(false);
   const [dirHandle, setDirHandle] = useState<FileSystemDirectoryHandle | null>(null);
 
+  const [syncMode, setSyncMode] = useSyncMode();
+  // Queued and bulk syncs run from older closures; read the current choice from a ref.
+  const syncModeRef = useRef(syncMode);
+  useEffect(() => {
+    syncModeRef.current = syncMode;
+  }, [syncMode]);
+
   const bulkStatusRef = useRef(bulkStatus);
   const bulkItemsRef = useRef<BulkItem[]>([]);
   const bulkLoopActiveRef = useRef(false);
@@ -332,132 +344,66 @@ export default function CreatorPage() {
     load();
   }, []);
 
-  const gearFolder = (tone: Tone): string => {
-    const g = tone.gear?.toLowerCase() || 'unknown';
-    if (g === 'full-rig' || g === 'amp-cab') return 'Amp_and_Cab';
-    if (g === 'amp' || g === 'amp-head') return 'Amps';
-    if (g === 'cabinet' || g === 'cab' || g === 'ir') return 'Cabinets_IRs';
-    if (g === 'pedal') return 'Pedals';
-    if (g === 'spaces') return 'Spaces';
-    return 'Other';
-  };
+  // Where each tone already lives on disk (by tone id), so re-syncs reuse the folder.
+  const localIndexRef = useRef<Map<number, PackLocation>>(new Map());
+  useEffect(() => {
+    if (!dirHandle) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        if ((await (dirHandle as any).queryPermission({ mode: 'read' })) !== 'granted') return;
+        const packs = (await scanLibrary(dirHandle)).sort((a, b) => (b.meta.synced_at || '').localeCompare(a.meta.synced_at || ''));
+        const index = new Map<number, PackLocation>();
+        for (const p of packs) if (!index.has(p.meta.id)) index.set(p.meta.id, { category: p.category, folder: p.folder });
+        if (!cancelled) localIndexRef.current = index;
+      } catch { /* index is an optimisation; syncing still works without it */ }
+    })();
+    return () => { cancelled = true; };
+  }, [dirHandle]);
 
-  const doDownload = async (tone: Tone) => {
+  const doDownload = async (tone: Tone): Promise<boolean> => {
+    const mode = syncModeRef.current;
+    let synced = false;
     try {
-      const legacy = await client.listModels(tone.id, { pageSize: 100 });
-      const a2 = await client.listModels(tone.id, { pageSize: 100, architecture: 2 });
-      let models: Model[] = [...legacy.data, ...a2.data];
-
-      const byName = new Map<string, Model>();
-      for (const m of models) {
-        const existing = byName.get(m.name);
-        if (!existing || String(m.architecture_version ?? '1') > String(existing.architecture_version ?? '1')) {
-          byName.set(m.name, m);
-        }
-      }
-      models = Array.from(byName.values());
-
-      if (models.length === 0) return;
-
-      let packHandle: FileSystemDirectoryHandle | null = null;
-      if (dirHandle) {
-        const safePack = (tone.title || 'Unnamed').replace(/[^a-z0-9 _-]/gi, '_').trim();
-        const catHandle = await dirHandle.getDirectoryHandle(gearFolder(tone), { create: true });
-        packHandle = await catHandle.getDirectoryHandle(safePack, { create: true });
-      }
-
-      const usedNames = new Set<string>();
-      const downloadedModelsInfo: any[] = [];
-
-      for (const m of models) {
-        try {
-          if (!m.model_url) continue;
-          const res = await client.directDownload(m.model_url);
-          if (!res.ok) continue;
-          const blob = await res.blob();
-
-          let internalMetadata: any = null;
-          let fileArchitecture: string | null = null;
-          try {
-            const text = await blob.text();
-            const parsed = JSON.parse(text);
-            internalMetadata = parsed.metadata || null;
-            fileArchitecture = parsed.architecture || null;
-          } catch {
-            // Not a JSON file (e.g. .wav / IR file)
-          }
-
-          let base = (m.name || 'model').replace(/[^a-z0-9 _-]/gi, '_').trim() || 'model';
-          if (usedNames.has(base)) { let j = 2; while (usedNames.has(`${base}_${j}`)) j++; base = `${base}_${j}`; }
-          usedNames.add(base);
-
-          const ext = (new URL(m.model_url).pathname.match(/\.([a-z0-9]+)$/i)?.[0] ?? '.nam').toLowerCase();
-          const filename = base + ext;
-
-          if (packHandle) {
-            const fh = await packHandle.getFileHandle(filename, { create: true });
-            const w = await fh.createWritable();
-            await w.write(blob);
-            await w.close();
-          } else {
-            const url = URL.createObjectURL(blob);
-            const a = Object.assign(document.createElement('a'), { href: url, download: filename });
-            document.body.appendChild(a); a.click(); a.remove();
-          }
-
-          downloadedModelsInfo.push({
-            id: m.id,
-            name: m.name,
-            size: m.size,
-            architecture: m.architecture_version || '1',
-            filename: filename,
-            internal_metadata: internalMetadata,
-            internal_architecture: fileArchitecture
-          });
-        } catch { /* swallow individual file error */ }
-      }
-
-      const metaObj = {
-        id: tone.id,
-        title: tone.title,
-        description: tone.description,
-        gear: tone.gear,
-        platform: tone.platform,
-        creator: tone.user?.username || 'unknown',
-        creator_id: tone.user_id,
+      const outcome = await syncTone({
+        client,
+        root: dirHandle,
+        tone,
+        mode,
+        location: localIndexRef.current.get(tone.id),
         url: toneHref(tone),
-        downloads_count: tone.downloads_count,
-        favorites_count: tone.favorites_count,
-        makes: tone.makes || [],
-        tags: tone.tags || [],
-        models: downloadedModelsInfo,
-        synced_at: new Date().toISOString()
-      };
+      });
+      synced = outcome.written > 0;
+      if (dirHandle) localIndexRef.current.set(tone.id, outcome.location);
 
-      if (packHandle) {
-        const metaFileHandle = await packHandle.getFileHandle('metadata.json', { create: true });
-        const metaWritable = await metaFileHandle.createWritable();
-        await metaWritable.write(JSON.stringify(metaObj, null, 2));
-        await metaWritable.close();
-      } else {
-        const metaBlob = new Blob([JSON.stringify(metaObj, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(metaBlob);
-        const a = Object.assign(document.createElement('a'), { href: url, download: 'metadata.json' });
-        document.body.appendChild(a); a.click(); a.remove();
+      if (synced) {
+        await client.trackDownload(tone.id).catch(err => {
+          console.error('Tracking failed:', err);
+          addToast(`Synced "${tone.title}", but failed to register download: ${err.message || err}`, 'error');
+        });
+        setDownloadedIds(prev => new Set(prev).add(tone.id));
       }
 
-      await client.trackDownload(tone.id).catch(err => {
-        console.error('Tracking failed:', err);
-        addToast(`Synced "${tone.title}", but failed to register download: ${err.message || err}`, 'error');
-      });
-      setDownloadedIds(prev => new Set(prev).add(tone.id));
-      addToast(`Synced "${tone.title}" (${models.length} model${models.length > 1 ? 's' : ''}).`, 'success');
+      const archivedNote = outcome.archived.length > 0
+        ? `, ${outcome.archived.length} older file${outcome.archived.length > 1 ? 's' : ''} moved to _Archive`
+        : '';
+      if (outcome.failed > 0) {
+        addToast(`Synced "${tone.title}" partially: ${outcome.failed} of ${outcome.failed + outcome.written} models failed. Re-sync to retry.`, 'error');
+      } else {
+        addToast(`Synced "${tone.title}" (${outcome.written} model${outcome.written !== 1 ? 's' : ''}${archivedNote}).`, 'success');
+      }
     } catch (err: any) {
-      addToast(`Error syncing "${tone.title}": ${err.message}`, 'error');
-      throw err;
+      console.error(err);
+      if (err instanceof NoMatchingModelsError) {
+        const label = SYNC_MODES.find(m => m.value === mode)?.label ?? mode;
+        addToast(`"${tone.title}" has no models for "${label}". Change Versions to sync it.`, 'info');
+      } else {
+        addToast(`Error syncing "${tone.title}": ${err.message}`, 'error');
+      }
     } finally {
       setDownloadingItems(prev => { const n = new Set(prev); n.delete(tone.id); return n; });
     }
+    return synced;
   };
 
   const handleDownload = async (tone: Tone) => {
@@ -469,7 +415,7 @@ export default function CreatorPage() {
       }
     }
     setDownloadingItems(prev => new Set(prev).add(tone.id));
-    syncQueueRef.current.push(() => doDownload(tone));
+    syncQueueRef.current.push(async () => { await doDownload(tone); });
     processSyncQueue();
   };
 
@@ -506,8 +452,7 @@ export default function CreatorPage() {
         }
 
         if (tone) {
-          await doDownload(tone);
-          item.status = 'done';
+          item.status = (await doDownload(tone)) ? 'done' : 'error';
         } else {
           throw new Error('Tone not found');
         }
@@ -654,7 +599,8 @@ export default function CreatorPage() {
               </p>
             </div>
           </div>
-          <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
+            <SyncModeSelect value={syncMode} onChange={setSyncMode} />
             <button
               className="action-btn"
               onClick={() => { setSelectionMode(m => !m); setSelectedIds(new Set()); }}

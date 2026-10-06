@@ -6,9 +6,10 @@ It is a thin, browser-only client over the [TONE3000 API](https://www.tone3000.c
 
 ## ✨ Key Features
 
-- **Direct Local Sync (File System Access API)**: NAMMAN requests permission to a local folder and writes `.nam` / `.wav` model files straight to disk, organized into `FullRig`, `Amps`, `Pedals`, `Cabinets_IRs`, and `Outboard` subfolders.
-- **Architecture Filtering**: Filter and sync by NAM architecture — A1 (legacy), A2, or custom — so you only pull models your plugin supports.
-- **Deduplication**: Identically-named models across architectures within a pack are de-duped, keeping the highest architecture.
+- **Direct Local Sync (File System Access API)**: NAMMAN requests permission to a local folder and writes `.nam` / `.wav` model files straight to disk, organized into `Amp_and_Cab`, `Amps`, `Pedals`, `Cabinets_IRs`, `Outboard`, `Spaces` and `Experimental` subfolders, one folder per tone with a `metadata.json`.
+- **One version per capture**: Creators often publish the same captures as A1, A2 and custom models under different names. The **Versions** setting picks per tone: *Best version* (default: A2 when the tone has it, otherwise A1, custom only as a last resort), *A2 only*, *A1 only*, *Custom only* or *Every version*. IRs are always included.
+- **Clean re-syncs**: Re-syncing a tone reuses its existing folder (found by tone id, even if the tone was renamed) and moves the files it replaces to `_Archive/<Category>/<Pack>/` in the library folder. Nothing is deleted, and nothing is moved if any download failed.
+- **Library cleanup**: *Clean up duplicate versions* scans every pack folder that has a `metadata.json`, lists the extra versions it holds (e.g. A1 leftovers next to A2 models) and, after you confirm, moves them to `_Archive`. Folders without metadata (manual packs, zips) and IRs are never touched.
 - **Favorites synced to TONE3000**: Bookmarking uses the TONE3000 favorite endpoints, so favorites follow your account everywhere.
 - **Download history**: A local (in-browser) record of what you've already synced.
 

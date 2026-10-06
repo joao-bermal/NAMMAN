@@ -17,7 +17,13 @@ import {
   startStandardFlow,
   handleOAuthCallback,
 } from '@/lib/tone3000/tone3000-client';
-import { Gear, TonesSort, type Tone, type Model, type ArchitectureVersion } from '@/lib/tone3000/types';
+import { Gear, TonesSort, type Tone, type ArchitectureVersion } from '@/lib/tone3000/types';
+import { scanLibrary, type PackLocation } from '@/lib/library/library';
+import { NoMatchingModelsError, syncTone } from '@/lib/library/sync';
+import { useSyncMode } from '@/lib/library/preferences';
+import { SYNC_MODES } from '@/lib/library/versions';
+import SyncModeSelect from './components/SyncModeSelect';
+import LibraryCleanup from './components/LibraryCleanup';
 
 // Single client instance. Tokens live in sessionStorage (see T3KClient).
 // onAuthRequired fires when tokens are missing/expired beyond refresh — we
@@ -86,21 +92,6 @@ const gearLabel = (tone: Tone): string => {
   return g.split(/[-_]/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 };
 
-const gearFolder = (tone: Tone): string => {
-  const g = tone.gear?.toLowerCase() || 'unknown';
-
-  if (g === 'full-rig' || g === 'amp-cab' || g === 'amp_cab' || g === 'amp+cab') return 'Amp_and_Cab';
-  if (g === 'amp' || g === 'amp-head' || g === 'amp_head') return 'Amps';
-  if (g === 'pedal') return 'Pedals';
-  if (g === 'ir' || g === 'cabinet' || g === 'cab') return 'Cabinets_IRs';
-  if (g === 'spaces' || g === 'space') return 'Spaces';
-  if (g === 'experimental') return 'Experimental';
-  if (g === 'outboard') return 'Outboard';
-  if (g === 'unknown') return 'Unknown';
-  
-  return g.split(/[-_]/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join('_');
-};
-
 const sortMap: Record<string, TonesSort> = {
   trending: TonesSort.Trending,
   newest: TonesSort.Newest,
@@ -143,7 +134,16 @@ export default function Home() {
   const [downloadedIds, setDownloadedIds] = useState<Set<number>>(new Set());
   const [downloadingItems, setDownloadingItems] = useState<Set<number>>(new Set());
   const [localTones, setLocalTones] = useState<Tone[]>([]);
+  // Where each tone already lives on disk (by tone id), so re-syncs reuse the folder.
+  const localIndexRef = useRef<Map<number, PackLocation>>(new Map());
   const [autoFavorite, setAutoFavorite] = useState(false);
+
+  const [syncMode, setSyncMode] = useSyncMode();
+  // Queued and bulk syncs run from older closures; read the current choice from a ref.
+  const syncModeRef = useRef(syncMode);
+  useEffect(() => {
+    syncModeRef.current = syncMode;
+  }, [syncMode]);
 
   // ── Bulk selection + progress panel ───────────────────────────────────────
   const [selectionMode, setSelectionMode] = useState(false);
@@ -314,34 +314,17 @@ export default function Home() {
 
   const scanLocalLibrary = useCallback(async (dir: FileSystemDirectoryHandle) => {
     try {
+      // Most recent sync first, so a tone found in two folders resolves to the newest one.
+      const packs = (await scanLibrary(dir)).sort((a, b) => (b.meta.synced_at || '').localeCompare(a.meta.synced_at || ''));
+      const index = new Map<number, PackLocation>();
       const tones: Tone[] = [];
-      const categories = ['Amp_and_Cab', 'Amps', 'Pedals', 'Cabinets_IRs', 'Spaces', 'Outboard', 'Experimental'];
-
-      for (const catName of categories) {
-        let catHandle: FileSystemDirectoryHandle;
-        try {
-          catHandle = await dir.getDirectoryHandle(catName);
-        } catch {
-          continue; 
-        }
-
-        for await (const [packName, entry] of (catHandle as any).entries()) {
-          if (entry.kind !== 'directory') continue;
-          const packHandle = entry as FileSystemDirectoryHandle;
-          try {
-            const metaFileHandle = await packHandle.getFileHandle('metadata.json');
-            const file = await metaFileHandle.getFile();
-            const text = await file.text();
-            const meta = JSON.parse(text);
-            if (meta && typeof meta.id === 'number') {
-              tones.push(meta as Tone);
-            }
-          } catch {
-            // no metadata.json
-          }
-        }
+      for (const p of packs) {
+        if (index.has(p.meta.id)) continue;
+        index.set(p.meta.id, { category: p.category, folder: p.folder });
+        tones.push(p.meta as unknown as Tone);
       }
-      
+      localIndexRef.current = index;
+
       // Sort local tones by recent first based on ID for a natural order
       tones.sort((a, b) => b.id - a.id);
       setLocalTones(tones);
@@ -517,178 +500,70 @@ export default function Home() {
     setDownloadingItems(prev => new Set(prev).add(tone.id));
 
     // Enqueue the actual work to run serially — this prevents parallel API burst
-    syncQueueRef.current.push(() => doDownload(tone));
+    syncQueueRef.current.push(async () => { await doDownload(tone); });
     processSyncQueue();
   };
 
-  const doDownload = async (tone: Tone) => {
+  const doDownload = async (tone: Tone): Promise<boolean> => {
     const fsSupported = typeof window !== 'undefined' && 'showDirectoryPicker' in window;
     if (fsSupported && !dirHandle) {
       addToast('Select a local folder above first.', 'info');
-      return;
+      return false;
     }
 
+    const mode = syncModeRef.current;
+    let synced = false;
     try {
-
-      // Pull legacy (A1 + Custom) and A2 models, then merge — the API has no
-      // single "all architectures" view.
-      // NOTE: We call these sequentially (not Promise.all) so they go through
-      // the client request queue and don't trigger Vercel WAF when many tones
-      // are synced at once.
-      const legacy = await client.listModels(tone.id, { pageSize: 100 });
-      const a2 = await client.listModels(tone.id, { pageSize: 100, architecture: 2 });
-      let models: Model[] = [...legacy.data, ...a2.data];
-
-      // Filter by the selected architecture (keep IRs/non-NAM regardless).
-      if (activeArchitecture) {
-        models = models.filter(m => m.architecture_version == null || String(m.architecture_version) === activeArchitecture);
-      }
-
-      // Deduplicate by name, keeping the highest architecture.
-      const byName = new Map<string, Model>();
-      for (const m of models) {
-        const existing = byName.get(m.name);
-        if (!existing || String(m.architecture_version ?? '1') > String(existing.architecture_version ?? '1')) {
-          byName.set(m.name, m);
-        }
-      }
-      models = Array.from(byName.values());
-
-      if (models.length === 0) {
-        addToast('No models matched the selected architecture.', 'info');
-        return;
-      }
-
-      // Target folder: <root>/<Category>/<Pack name>/
-      const safePack = (tone.title || 'Unnamed_Pack').replace(/[^a-z0-9 _-]/gi, '_').trim();
-      let packHandle: FileSystemDirectoryHandle | null = null;
-      if (dirHandle) {
-        const categoryHandle = await dirHandle.getDirectoryHandle(gearFolder(tone), { create: true });
-        packHandle = await categoryHandle.getDirectoryHandle(safePack, { create: true });
-      }
-
-      const usedNames = new Set<string>();
-      const downloadedModelsInfo: any[] = [];
-
-      for (let i = 0; i < models.length; i++) {
-        const m = models[i];
-        try {
-          if (!m.model_url) continue;
-          const res = await client.directDownload(m.model_url);
-          if (!res.ok) throw new Error(`Failed to download ${m.name} (${res.status})`);
-          const blob = await res.blob();
-
-          let internalMetadata: any = null;
-          let fileArchitecture: string | null = null;
-          try {
-            const text = await blob.text();
-            const parsed = JSON.parse(text);
-            internalMetadata = parsed.metadata || null;
-            fileArchitecture = parsed.architecture || null;
-          } catch {
-            // Not a JSON file (e.g. .wav / IR file)
-          }
-
-          let base = (m.name || 'model').replace(/[^a-z0-9 _-]/gi, '_').trim() || 'model';
-          if (usedNames.has(base)) {
-            let j = 2;
-            while (usedNames.has(`${base}_${j}`)) j++;
-            base = `${base}_${j}`;
-          }
-          usedNames.add(base);
-
-          const ext = (new URL(m.model_url).pathname.match(/\.([a-z0-9]+)$/i)?.[0] ?? '.nam').toLowerCase();
-          const filename = base + ext;
-
-          if (packHandle) {
-            const fileHandle = await packHandle.getFileHandle(filename, { create: true });
-            const writable = await fileHandle.createWritable();
-            await writable.write(blob);
-            await writable.close();
-          } else {
-            // Fallback: browser download (no File System Access API)
-            const url = URL.createObjectURL(blob);
-            const a = Object.assign(document.createElement('a'), { href: url, download: filename });
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-          }
-
-          downloadedModelsInfo.push({
-            id: m.id,
-            name: m.name,
-            size: m.size,
-            architecture: m.architecture_version || '1',
-            filename: filename,
-            internal_metadata: internalMetadata,
-            internal_architecture: fileArchitecture
-          });
-        } catch (err) {
-          console.error(`Error downloading model ${m.name}:`, err);
-          // Swallowing individual model error so the rest of the pack can sync
-        }
-      }
-
-      const metaObj = {
-        id: tone.id,
-        title: tone.title,
-        description: tone.description,
-        gear: tone.gear,
-        platform: tone.platform,
-        creator: tone.user?.username || 'unknown',
-        creator_id: tone.user_id,
+      const outcome = await syncTone({
+        client,
+        root: dirHandle,
+        tone,
+        mode,
+        location: localIndexRef.current.get(tone.id),
         url: toneHref(tone),
-        downloads_count: tone.downloads_count,
-        favorites_count: tone.favorites_count,
-        makes: tone.makes || [],
-        tags: tone.tags || [],
-        models: downloadedModelsInfo,
-        synced_at: new Date().toISOString()
-      };
+      });
+      synced = outcome.written > 0;
 
-      if (packHandle) {
-        const metaFileHandle = await packHandle.getFileHandle('metadata.json', { create: true });
-        const metaWritable = await metaFileHandle.createWritable();
-        await metaWritable.write(JSON.stringify(metaObj, null, 2));
-        await metaWritable.close();
-      } else {
-        // Fallback browser download of metadata.json
-        const metaBlob = new Blob([JSON.stringify(metaObj, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(metaBlob);
-        const a = Object.assign(document.createElement('a'), { href: url, download: 'metadata.json' });
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
+      if (dirHandle) {
+        localIndexRef.current.set(tone.id, outcome.location);
+        // Update local tones immediately for Local Library UI responsiveness
+        setLocalTones(prev => [outcome.meta as unknown as Tone, ...prev.filter(t => t.id !== tone.id)]);
       }
-      // Update local tones immediately for Local Library UI responsiveness
-      setLocalTones(prev => {
-        if (!prev.find(t => t.id === tone.id)) {
-          return [metaObj as unknown as Tone, ...prev];
-        }
-        return prev;
-      });
 
-      await client.trackDownload(tone.id).catch(err => {
-        console.error('Tracking failed:', err);
-        addToast(`Synced "${tone.title}", but failed to register download: ${err.message || err}`, 'error');
-      });
-      addToast(`Synced "${tone.title}" (${models.length} model${models.length > 1 ? 's' : ''}).`, 'success');
+      if (synced) {
+        await client.trackDownload(tone.id).catch(err => {
+          console.error('Tracking failed:', err);
+          addToast(`Synced "${tone.title}", but failed to register download: ${err.message || err}`, 'error');
+        });
+      }
+
+      const archivedNote = outcome.archived.length > 0
+        ? `, ${outcome.archived.length} older file${outcome.archived.length > 1 ? 's' : ''} moved to _Archive`
+        : '';
+      if (outcome.failed > 0) {
+        addToast(`Synced "${tone.title}" partially: ${outcome.failed} of ${outcome.failed + outcome.written} models failed. Re-sync to retry.`, 'error');
+      } else {
+        addToast(`Synced "${tone.title}" (${outcome.written} model${outcome.written !== 1 ? 's' : ''}${archivedNote}).`, 'success');
+      }
     } catch (err: any) {
       console.error(err);
-      if (err.message?.includes('429')) {
+      if (err instanceof NoMatchingModelsError) {
+        const label = SYNC_MODES.find(m => m.value === mode)?.label ?? mode;
+        addToast(`"${tone.title}" has no models for "${label}". Change Versions to sync it.`, 'info');
+      } else if (err.message?.includes('429')) {
         addToast(`Tone3000 Rate Limit exceeded. Please wait a few minutes.`, 'error');
       } else {
         addToast(`Error syncing "${tone.title}".`, 'error');
       }
     } finally {
-      // Mark as downloaded immediately in local state
-      setDownloadedIds(prev => new Set(prev).add(tone.id));
+      if (synced) setDownloadedIds(prev => new Set(prev).add(tone.id));
       setDownloadingItems(prev => {
         const n = new Set(prev);
         n.delete(tone.id);
         return n;
       });
     }
+    return synced;
   };
 
   const runBulkLoop = async () => {
@@ -724,8 +599,7 @@ export default function Home() {
         }
 
         if (tone) {
-          await doDownload(tone);
-          item.status = 'done';
+          item.status = (await doDownload(tone)) ? 'done' : 'error';
         } else {
           throw new Error('Tone not found');
         }
@@ -932,9 +806,26 @@ export default function Home() {
             )}
           </p>
         </div>
-        <button onClick={selectDirectory} className="search-button" style={{ background: dirHandle ? 'transparent' : 'var(--primary-color)', color: dirHandle ? 'var(--primary-color)' : '#000', border: dirHandle ? '1px solid var(--primary-color)' : 'none', fontSize: '1.1rem', padding: '1rem 2rem', borderRadius: '8px' }}>
-          {dirHandle ? 'Change Folder' : 'Select Local Folder'}
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+          <SyncModeSelect value={syncMode} onChange={setSyncMode} />
+          <button onClick={selectDirectory} className="search-button" style={{ background: dirHandle ? 'transparent' : 'var(--primary-color)', color: dirHandle ? 'var(--primary-color)' : '#000', border: dirHandle ? '1px solid var(--primary-color)' : 'none', fontSize: '1.1rem', padding: '1rem 2rem', borderRadius: '8px' }}>
+            {dirHandle ? 'Change Folder' : 'Select Local Folder'}
+          </button>
+        </div>
+        <div style={{ flexBasis: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap', borderTop: '1px solid var(--surface-border)', paddingTop: '1rem' }}>
+          <span style={{ color: 'var(--text-muted)', fontSize: '0.95rem' }}>
+            {SYNC_MODES.find(m => m.value === syncMode)?.hint} Re-syncing a pack moves the versions it replaces to <code>_Archive</code>.
+          </span>
+          {dirHandle && (
+            <LibraryCleanup
+              root={dirHandle}
+              mode={syncMode}
+              ensurePermission={() => verifyFolderPermission(dirHandle)}
+              notify={addToast}
+              onFinished={() => scanLocalLibrary(dirHandle)}
+            />
+          )}
+        </div>
       </div>
 
 
