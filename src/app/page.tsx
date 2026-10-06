@@ -24,6 +24,7 @@ import { useSyncMode } from '@/lib/library/preferences';
 import { SYNC_MODES } from '@/lib/library/versions';
 import SyncModeSelect from './components/SyncModeSelect';
 import LibraryCleanup from './components/LibraryCleanup';
+import { KeepVisibleHint, useBulkTitle } from './components/bulk';
 
 // Single client instance. Tokens live in sessionStorage (see T3KClient).
 // onAuthRequired fires when tokens are missing/expired beyond refresh — we
@@ -173,6 +174,8 @@ export default function Home() {
   useEffect(() => {
     bulkStatusRef.current = bulkStatus;
   }, [bulkStatus]);
+
+  useBulkTitle(bulkItems.filter(i => i.status === 'done' || i.status === 'error').length, bulkItems.length, bulkStatus);
 
   // Load saved bulk progress from localStorage
   useEffect(() => {
@@ -1211,6 +1214,7 @@ export default function Home() {
                 {bulkItems.filter(i => i.status === 'done').length} / {bulkItems.length} completed
                 {bulkItems.filter(i => i.status === 'error').length > 0 && ` · ${bulkItems.filter(i => i.status === 'error').length} errors`}
               </p>
+              {bulkStatus === 'running' && <KeepVisibleHint />}
             </div>
             <button onClick={() => setIsBulkPanelOpen(false)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}>
               <X size={20} />

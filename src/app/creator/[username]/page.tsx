@@ -17,6 +17,7 @@ import { NoMatchingModelsError, syncTone } from '@/lib/library/sync';
 import { useSyncMode } from '@/lib/library/preferences';
 import { SYNC_MODES } from '@/lib/library/versions';
 import SyncModeSelect from '../../components/SyncModeSelect';
+import { KeepVisibleHint, useBulkTitle } from '../../components/bulk';
 
 const client = new T3KClient(PUBLISHABLE_KEY, () => {
   if (typeof window !== 'undefined') startStandardFlow(PUBLISHABLE_KEY, getRedirectUri());
@@ -212,6 +213,8 @@ export default function CreatorPage() {
   useEffect(() => {
     bulkStatusRef.current = bulkStatus;
   }, [bulkStatus]);
+
+  useBulkTitle(bulkItems.filter(i => i.status === 'done' || i.status === 'error').length, bulkItems.length, bulkStatus);
 
   // Load saved bulk progress from localStorage
   useEffect(() => {
@@ -825,6 +828,7 @@ export default function CreatorPage() {
               <p style={{ margin: '0.3rem 0 0', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
                 {bulkDone} / {bulkItems.length} completed {bulkErrors > 0 && `· ${bulkErrors} errors`}
               </p>
+              {bulkStatus === 'running' && <KeepVisibleHint />}
             </div>
             <button onClick={() => setIsPanelOpen(false)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}>
               <X size={20} />
