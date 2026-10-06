@@ -109,7 +109,7 @@ const sortMap: Record<string, TonesSort> = {
   'best-match': TonesSort.BestMatch,
 };
 
-type Tab = 'search' | 'favorites' | 'downloads';
+type Tab = 'search' | 'favorites' | 'downloads' | 'local' | 'sync';
 
 // The File System Access API permission methods aren't in the default TS DOM
 // lib yet, so we narrow to the bits we use.
@@ -142,6 +142,7 @@ export default function Home() {
   const [favoriteIds, setFavoriteIds] = useState<Set<number>>(new Set());
   const [downloadedIds, setDownloadedIds] = useState<Set<number>>(new Set());
   const [downloadingItems, setDownloadingItems] = useState<Set<number>>(new Set());
+  const [localTones, setLocalTones] = useState<Tone[]>([]);
   const [autoFavorite, setAutoFavorite] = useState(false);
 
   // ── Bulk selection + progress panel ───────────────────────────────────────
@@ -311,7 +312,43 @@ export default function Home() {
     }
   }, []);
 
+  const scanLocalLibrary = useCallback(async (dir: FileSystemDirectoryHandle) => {
+    try {
+      const tones: Tone[] = [];
+      const categories = ['Amp_and_Cab', 'Amps', 'Pedals', 'Cabinets_IRs', 'Spaces', 'Outboard', 'Experimental'];
 
+      for (const catName of categories) {
+        let catHandle: FileSystemDirectoryHandle;
+        try {
+          catHandle = await dir.getDirectoryHandle(catName);
+        } catch {
+          continue; 
+        }
+
+        for await (const [packName, entry] of (catHandle as any).entries()) {
+          if (entry.kind !== 'directory') continue;
+          const packHandle = entry as FileSystemDirectoryHandle;
+          try {
+            const metaFileHandle = await packHandle.getFileHandle('metadata.json');
+            const file = await metaFileHandle.getFile();
+            const text = await file.text();
+            const meta = JSON.parse(text);
+            if (meta && typeof meta.id === 'number') {
+              tones.push(meta as Tone);
+            }
+          } catch {
+            // no metadata.json
+          }
+        }
+      }
+      
+      // Sort local tones by recent first based on ID for a natural order
+      tones.sort((a, b) => b.id - a.id);
+      setLocalTones(tones);
+    } catch (err) {
+      console.error('Error scanning local library:', err);
+    }
+  }, []);
 
   const bootstrapConnected = useCallback(async () => {
     setConnected(true);
@@ -361,6 +398,13 @@ export default function Home() {
     }
   }, [bootstrapConnected]);
 
+  useEffect(() => {
+    if (dirHandle) {
+      scanLocalLibrary(dirHandle);
+    } else {
+      setLocalTones([]);
+    }
+  }, [dirHandle, scanLocalLibrary]);
 
   const connect = () => startStandardFlow(PUBLISHABLE_KEY, getRedirectUri());
 
@@ -616,6 +660,13 @@ export default function Home() {
         a.click();
         a.remove();
       }
+      // Update local tones immediately for Local Library UI responsiveness
+      setLocalTones(prev => {
+        if (!prev.find(t => t.id === tone.id)) {
+          return [metaObj as unknown as Tone, ...prev];
+        }
+        return prev;
+      });
 
       await client.trackDownload(tone.id).catch(err => {
         console.error('Tracking failed:', err);
@@ -892,6 +943,8 @@ export default function Home() {
           <button className={`tab-btn ${activeTab === 'search' ? 'active' : ''}`} onClick={() => { setActiveTab('search'); setCurrentPage(1); setSelectionMode(false); setSelectedIds(new Set()); }}>Search</button>
           <button className={`tab-btn ${activeTab === 'favorites' ? 'active' : ''}`} onClick={() => { setActiveTab('favorites'); setCurrentPage(1); setSelectionMode(false); setSelectedIds(new Set()); }}>My Favorites</button>
           <button className={`tab-btn ${activeTab === 'downloads' ? 'active' : ''}`} onClick={() => { setActiveTab('downloads'); setCurrentPage(1); setSelectionMode(false); setSelectedIds(new Set()); }}>My Downloads</button>
+          <button className={`tab-btn ${activeTab === 'local' ? 'active' : ''}`} onClick={() => { setActiveTab('local'); setCurrentPage(1); setSelectionMode(false); setSelectedIds(new Set()); }}>Local Library</button>
+          <button className={`tab-btn ${activeTab === 'sync' ? 'active' : ''}`} onClick={() => { setActiveTab('sync'); setCurrentPage(1); setSelectionMode(false); setSelectedIds(new Set()); }}>Sync Status</button>
         </div>
         <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
           <button
@@ -994,8 +1047,48 @@ export default function Home() {
         </div>
       )}
 
+      {activeTab === 'sync' && (
+        <div style={{ marginBottom: '3rem' }}>
+          <h2 style={{ marginBottom: '1rem', color: 'var(--primary-color)' }}>Sync Diff: Missing Locally</h2>
+          <p style={{ marginBottom: '1rem', color: 'var(--text-muted)' }}>These profiles are in your online Tone3000 account history, but are not downloaded to your local disk.</p>
+          {(() => {
+            const missingLocallyIds = Array.from(downloadedIds).filter(id => !localTones.some(t => t.id === id));
+            if (missingLocallyIds.length === 0) return <div style={{ color: '#10b981', padding: '1rem', background: 'rgba(16, 185, 129, 0.1)', borderRadius: '8px' }}>Everything is synced! No pending downloads.</div>;
+            return (
+              <div style={{ background: 'rgba(250, 204, 21, 0.05)', padding: '1.5rem', borderRadius: '12px', border: '1px solid rgba(250, 204, 21, 0.2)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontSize: '1.1rem', fontWeight: 600 }}>{missingLocallyIds.length} profile{missingLocallyIds.length > 1 ? 's' : ''} missing locally</span>
+                  <button className="search-button" onClick={() => handleBulkDownload(missingLocallyIds)} style={{ padding: '0.8rem 1.5rem', fontSize: '1rem', background: '#facc15', color: '#000', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 600 }}>
+                    Download Missing Profiles
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {activeTab === 'sync' && (
+        <div style={{ marginBottom: '2rem' }}>
+          <h2 style={{ color: 'var(--primary-color)', marginBottom: '1rem' }}>Sync Diff: Orphaned / Archived Locally</h2>
+          <p style={{ color: 'var(--text-muted)' }}>These profiles exist physically on your disk but are NOT in your online history.</p>
+        </div>
+      )}
+
       <div className="models-list">
-        {results.map(tone => {
+        {(() => {
+          const currentList = activeTab === 'local' 
+            ? localTones 
+            : activeTab === 'sync' 
+              ? localTones.filter(t => !downloadedIds.has(t.id)) 
+              : results;
+          
+          const paginatedList = (activeTab === 'local' || activeTab === 'sync')
+            ? currentList.slice((currentPage - 1) * 20, currentPage * 20)
+            : currentList;
+            
+          return paginatedList;
+        })().map(tone => {
           const isDownloaded = downloadedIds.has(tone.id);
           const isFavorited = favoriteIds.has(tone.id);
           const image = tone.images && tone.images.length > 0 ? tone.images[0] : null;
@@ -1119,21 +1212,43 @@ export default function Home() {
         })}
       </div>
 
-      {totalPages > 1 && (
-        <div className="pagination-controls" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '1rem', marginTop: '3rem' }}>
-          <button className="action-btn" disabled={currentPage === 1 || isSearching} onClick={() => setCurrentPage(p => Math.max(1, p - 1))}>Previous</button>
-          <span style={{ fontSize: '0.9rem' }}>Page {currentPage} of {totalPages}</span>
-          <button className="action-btn" disabled={currentPage >= totalPages || isSearching} onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}>Next</button>
-        </div>
-      )}
+      {(() => {
+        const currentList = activeTab === 'local' 
+            ? localTones 
+            : activeTab === 'sync' 
+              ? localTones.filter(t => !downloadedIds.has(t.id)) 
+              : results;
+        const localTotalPages = (activeTab === 'local' || activeTab === 'sync') ? Math.max(1, Math.ceil(currentList.length / 20)) : totalPages;
+        
+        if (localTotalPages <= 1) return null;
+        return (
+          <div className="pagination-controls" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '1rem', marginTop: '3rem' }}>
+            <button className="action-btn" disabled={currentPage === 1 || isSearching} onClick={() => setCurrentPage(p => Math.max(1, p - 1))}>Previous</button>
+            <span style={{ fontSize: '0.9rem' }}>Page {currentPage} of {localTotalPages}</span>
+            <button className="action-btn" disabled={currentPage >= localTotalPages || isSearching} onClick={() => setCurrentPage(p => Math.min(localTotalPages, p + 1))}>Next</button>
+          </div>
+        );
+      })()}
 
-      {results.length === 0 && !isSearching && (
-        <div style={{ textAlign: 'center', marginTop: '3rem', color: 'var(--text-muted)' }}>
-          {activeTab === 'favorites' ? 'No favorites yet — bookmark a tone to see it here.'
-            : activeTab === 'downloads' ? 'No synced tones yet.'
-            : query ? `No tones found for "${query}"` : 'No tones found.'}
-        </div>
-      )}
+      {(() => {
+        const currentList = activeTab === 'local' 
+            ? localTones 
+            : activeTab === 'sync' 
+              ? localTones.filter(t => !downloadedIds.has(t.id)) 
+              : results;
+        if (currentList.length === 0 && !isSearching) {
+          return (
+            <div style={{ textAlign: 'center', marginTop: '3rem', color: 'var(--text-muted)' }}>
+              {activeTab === 'favorites' ? 'No favorites yet — bookmark a tone to see it here.'
+                : activeTab === 'downloads' ? 'No synced tones yet.'
+                : activeTab === 'local' ? 'No tones found locally in your folder.'
+                : activeTab === 'sync' ? 'No orphaned profiles found.'
+                : query ? `No tones found for "${query}"` : 'No tones found.'}
+            </div>
+          );
+        }
+        return null;
+      })()}
 
       {/* Floating bulk bar */}
       {selectionMode && selectedIds.size > 0 && (
